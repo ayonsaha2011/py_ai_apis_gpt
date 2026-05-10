@@ -768,13 +768,28 @@ async fn dispatch_one_video_job(state: AppState) -> Result<()> {
     else {
         return Ok(());
     };
+    let req: VideoJobRequest = match serde_json::from_str(&params_json) {
+        Ok(req) => req,
+        Err(err) => {
+            state
+                .db
+                .update_video_job(
+                    &job_id,
+                    "failed",
+                    0.0,
+                    None,
+                    Some(&format!("invalid video job params_json: {err}")),
+                    None,
+                )
+                .await?;
+            return Ok(());
+        }
+    };
     let _permit = state.admission.acquire_video_heavy().await?;
     state
         .db
         .mark_video_stage(&job_id, "materializing_inputs", 0.05)
         .await?;
-    let req: VideoJobRequest =
-        serde_json::from_str(&params_json).map_err(|e| AppError::BadRequest(e.to_string()))?;
     let body = json!({
         "job_id": job_id,
         "request": req,

@@ -59,6 +59,10 @@ impl Db {
             self.record_migration("004_video_job_runtime_columns")
                 .await?;
         }
+        if !self.migration_applied("005_video_job_core_columns").await? {
+            self.ensure_video_job_core_columns().await?;
+            self.record_migration("005_video_job_core_columns").await?;
+        }
         Ok(())
     }
 
@@ -87,6 +91,44 @@ impl Db {
         self.add_column_if_missing("video_jobs", "completed_at", "INTEGER")
             .await?;
         self.add_column_if_missing("video_jobs", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+            .await?;
+        Ok(())
+    }
+
+    async fn ensure_video_job_core_columns(&self) -> anyhow::Result<()> {
+        self.add_column_if_missing("video_jobs", "id", "TEXT NOT NULL DEFAULT ''")
+            .await?;
+        self.add_column_if_missing("video_jobs", "user_id", "TEXT NOT NULL DEFAULT ''")
+            .await?;
+        self.add_column_if_missing(
+            "video_jobs",
+            "mode",
+            "TEXT NOT NULL DEFAULT 'text_to_video'",
+        )
+        .await?;
+        self.add_column_if_missing("video_jobs", "status", "TEXT NOT NULL DEFAULT 'failed'")
+            .await?;
+        self.add_column_if_missing("video_jobs", "prompt", "TEXT NOT NULL DEFAULT ''")
+            .await?;
+        self.add_column_if_missing("video_jobs", "params_json", "TEXT NOT NULL DEFAULT '{}'")
+            .await?;
+        self.add_column_if_missing("video_jobs", "effective_seed", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
+        self.add_column_if_missing("video_jobs", "r2_key", "TEXT NOT NULL DEFAULT ''")
+            .await?;
+        self.add_column_if_missing("video_jobs", "created_at", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
+        self.fail_legacy_video_jobs_without_params().await?;
+        Ok(())
+    }
+
+    async fn fail_legacy_video_jobs_without_params(&self) -> anyhow::Result<()> {
+        let now = now_ts();
+        self.conn
+            .execute(
+                "UPDATE video_jobs SET status = 'failed', progress = 0.0, error = COALESCE(error, 'legacy video job is missing params_json; resubmit the request'), updated_at = CASE WHEN updated_at = 0 THEN ? ELSE updated_at END, completed_at = COALESCE(completed_at, ?) WHERE params_json = '{}' AND status IN ('queued','running','materializing_inputs','generating','encoding','upscaling','uploading')",
+                params![now, now],
+            )
             .await?;
         Ok(())
     }
@@ -875,6 +917,7 @@ mod tests {
             db.migration_applied("004_video_job_runtime_columns")
                 .await?
         );
+        assert!(db.migration_applied("005_video_job_core_columns").await?);
         Ok(())
     }
 
@@ -921,6 +964,68 @@ mod tests {
             assert!(db.column_exists("video_jobs", column).await?, "{column}");
         }
         db.recover_interrupted_video_jobs().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_repairs_legacy_video_jobs_without_params_json() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let config = config_for(&dir.path().join("legacy-no-params.db"));
+        let db = Db::connect(&config).await?;
+        db.conn
+            .execute_batch(
+                "
+                CREATE TABLE schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                );
+                INSERT INTO schema_migrations (version, applied_at) VALUES
+                    ('001_init', 1),
+                    ('002_user_roles', 1),
+                    ('003_video_metadata', 1),
+                    ('004_video_job_runtime_columns', 1);
+                CREATE TABLE users (
+                    id TEXT PRIMARY KEY,
+                    email TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE video_jobs (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    effective_seed INTEGER NOT NULL,
+                    r2_key TEXT NOT NULL UNIQUE,
+                    result_url TEXT,
+                    error TEXT,
+                    progress REAL NOT NULL DEFAULT 0.0,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    started_at INTEGER,
+                    updated_at INTEGER NOT NULL,
+                    completed_at INTEGER
+                );
+                INSERT INTO users (id, email, password_hash, role, created_at)
+                    VALUES ('user-1', 'user@example.com', 'hash', 'user', 1);
+                INSERT INTO video_jobs (id, user_id, mode, status, prompt, effective_seed, r2_key, progress, metadata_json, cancel_requested, created_at, updated_at)
+                    VALUES ('job-1', 'user-1', 'text_to_video', 'queued', 'legacy prompt', 7, 'users/user-1/videos/job-1/output.mp4', 0.0, '{}', 0, 1, 1);
+                ",
+            )
+            .await?;
+        db.migrate().await?;
+        assert!(db.column_exists("video_jobs", "params_json").await?);
+        assert!(db.migration_applied("005_video_job_core_columns").await?);
+        assert!(db.next_queued_video_job().await?.is_none());
+        let job = db.video_job("user-1", "job-1").await?.unwrap();
+        assert_eq!(job.status, "failed");
+        assert!(job
+            .error
+            .unwrap_or_default()
+            .contains("missing params_json"));
         Ok(())
     }
 
