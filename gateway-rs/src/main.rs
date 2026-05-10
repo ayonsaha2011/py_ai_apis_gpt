@@ -11,7 +11,10 @@ mod validation;
 
 use std::sync::Arc;
 
-use axum::Router;
+use axum::{
+    http::{header, HeaderName, HeaderValue, Method},
+    Router,
+};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -59,7 +62,8 @@ async fn main() -> anyhow::Result<()> {
             .pool_max_idle_per_host(64)
             .build()?,
         admission: Admission::new(
-            config.local_max_heavy_jobs,
+            config.text_heavy_jobs,
+            config.video_heavy_jobs,
             config.text_max_waiting,
             config.ltx_max_waiting,
         ),
@@ -70,11 +74,39 @@ async fn main() -> anyhow::Result<()> {
     routes::spawn_video_dispatcher(state.clone());
 
     let app: Router = router(state)
-        .layer(CorsLayer::permissive())
+        .layer(cors_layer(&config))
         .layer(TraceLayer::new_for_http());
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     tracing::info!("gateway listening on {}", config.bind_addr);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn cors_layer(config: &Config) -> CorsLayer {
+    if config.cors_permissive {
+        return CorsLayer::permissive();
+    }
+
+    let origins = config
+        .cors_allowed_origins
+        .iter()
+        .filter_map(|origin| origin.parse::<HeaderValue>().ok())
+        .collect::<Vec<_>>();
+
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            HeaderName::from_static("x-admin-key"),
+            HeaderName::from_static("x-service-key"),
+        ])
 }

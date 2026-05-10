@@ -1,0 +1,19 @@
+[Unit]
+Description=py_ai_apis_gpt text worker
+After=network-online.target qdrant.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/workspace/py_ai_apis_gpt/services/text-worker
+EnvironmentFile=/workspace/py_ai_apis_gpt/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/workspace/py_ai_apis_gpt/.venv-h100/bin/uvicorn app.main:app --host 127.0.0.1 --port 8101
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=append:/workspace/py_ai_apis_gpt/runtime/logs/text.log
+StandardError=append:/workspace/py_ai_apis_gpt/runtime/logs/text.log
+
+[Install]
+WantedBy=multi-user.target

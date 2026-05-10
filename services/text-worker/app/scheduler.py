@@ -85,6 +85,7 @@ class GenerationTicket:
     max_new_tokens: int
     future: asyncio.Future[str]
     stream: asyncio.Queue[str | None] | None
+    cancelled: bool = False
 
 
 @dataclass
@@ -108,9 +109,11 @@ class GenerationScheduler:
         self.kv_cache = KVCacheManager(settings.kv_cache_bytes, settings.kv_cache_ttl_seconds)
         self._task: asyncio.Task | None = None
         self._shutdown = asyncio.Event()
+        self._model_lock = asyncio.Lock()
 
     async def start(self) -> None:
-        await asyncio.to_thread(self._load_model, self.model_id)
+        async with self._model_lock:
+            await asyncio.to_thread(self._load_model, self.model_id)
         self._task = asyncio.create_task(self._run())
 
     async def stop(self) -> None:
@@ -120,14 +123,16 @@ class GenerationScheduler:
             await asyncio.gather(self._task, return_exceptions=True)
 
     async def switch_model(self, model_id: str) -> None:
-        self.model_id = model_id
-        await asyncio.to_thread(self._load_model, model_id)
-        self.kv_cache = KVCacheManager(settings.kv_cache_bytes, settings.kv_cache_ttl_seconds)
+        async with self._model_lock:
+            self.model_id = model_id
+            await asyncio.to_thread(self._load_model, model_id)
+            self.kv_cache = KVCacheManager(settings.kv_cache_bytes, settings.kv_cache_ttl_seconds)
 
     async def submit(self, request: ChatRequest) -> str:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
-        ticket = self._ticket(request, future, None)
+        async with self._model_lock:
+            ticket = self._ticket(request, future, None)
         await self.waiting.put(ticket)
         return await future
 
@@ -135,14 +140,21 @@ class GenerationScheduler:
         loop = asyncio.get_running_loop()
         future: asyncio.Future[str] = loop.create_future()
         queue: asyncio.Queue[str | None] = asyncio.Queue(maxsize=256)
-        ticket = self._ticket(request, future, queue)
+        async with self._model_lock:
+            ticket = self._ticket(request, future, queue)
         await self.waiting.put(ticket)
-        while True:
-            item = await queue.get()
-            if item is None:
-                break
-            yield item
-        await future
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield item
+            await future
+        except asyncio.CancelledError:
+            ticket.cancelled = True
+            if not future.done():
+                future.cancel()
+            raise
 
     def _ticket(self, request: ChatRequest, future: asyncio.Future[str], queue: asyncio.Queue[str | None] | None) -> GenerationTicket:
         assert self.tokenizer is not None
@@ -195,16 +207,40 @@ class GenerationScheduler:
             if not active:
                 await asyncio.sleep(settings.scheduler_tick_ms / 1000)
                 continue
-            await asyncio.to_thread(self._decode_one_tick, active)
+            try:
+                async with self._model_lock:
+                    await asyncio.to_thread(self._decode_one_tick, active)
+            except Exception as exc:
+                self._fail_states(active, exc)
             active[:] = [state for state in active if not state.finished]
 
     async def _admit(self, active: list[ActiveState]) -> None:
         while len(active) < settings.max_active and not self.waiting.empty():
             ticket = await self.waiting.get()
+            if ticket.future.cancelled() or ticket.cancelled:
+                continue
+            if len(ticket.prompt_ids) > settings.max_batch_tokens:
+                ticket.future.set_exception(RuntimeError("prompt exceeds TEXT_MAX_BATCH_TOKENS"))
+                if ticket.stream is not None:
+                    try:
+                        ticket.stream.put_nowait(None)
+                    except asyncio.QueueFull:
+                        pass
+                continue
+            if active and self._active_token_budget(active) + len(ticket.prompt_ids) > settings.max_batch_tokens:
+                await self.waiting.put(ticket)
+                break
             active.append(ActiveState(ticket=ticket))
         prefill = [state for state in active if state.past is None and not state.finished]
         if prefill:
-            await asyncio.to_thread(self._prefill, prefill)
+            try:
+                async with self._model_lock:
+                    await asyncio.to_thread(self._prefill, prefill)
+            except Exception as exc:
+                self._fail_states(prefill, exc)
+
+    def _active_token_budget(self, active: list[ActiveState]) -> int:
+        return sum(len(state.ticket.prompt_ids) + len(state.generated) for state in active if not state.finished)
 
     def _prefill(self, states: list[ActiveState]) -> None:
         assert self.model is not None and self.tokenizer is not None
@@ -252,6 +288,9 @@ class GenerationScheduler:
     def _decode_one_tick(self, active: list[ActiveState]) -> None:
         grouped: dict[int, list[ActiveState]] = defaultdict(list)
         for state in active:
+            if state.ticket.cancelled or state.ticket.future.cancelled():
+                state.finished = True
+                continue
             if not state.finished and state.past is not None and state.next_input_id is not None:
                 grouped[state.past_len].append(state)
         for states in grouped.values():
@@ -270,12 +309,25 @@ class GenerationScheduler:
             state.generated.append(emitted)
             token = self.tokenizer.decode([emitted], skip_special_tokens=True)
             if token and state.ticket.stream is not None:
-                state.ticket.stream.put_nowait(token)
+                if not self._emit_stream(state, token):
+                    continue
             state.past = _split_past(out.past_key_values, idx)
             state.past_len += 1
             state.next_input_id = next_ids[idx]
             if emitted == self.tokenizer.eos_token_id or len(state.generated) >= state.ticket.max_new_tokens:
                 self._finish_state(state)
+
+    def _emit_stream(self, state: ActiveState, item: str | None) -> bool:
+        if state.ticket.stream is None:
+            return True
+        try:
+            state.ticket.stream.put_nowait(item)
+            return True
+        except asyncio.QueueFull:
+            state.finished = True
+            if not state.ticket.future.done():
+                state.ticket.future.set_exception(RuntimeError("stream client is not reading fast enough"))
+            return False
 
     def _finish_state(self, state: ActiveState) -> None:
         assert self.tokenizer is not None
@@ -284,7 +336,18 @@ class GenerationScheduler:
         if not state.ticket.future.done():
             state.ticket.future.set_result(text)
         if state.ticket.stream is not None:
-            state.ticket.stream.put_nowait(None)
+            self._emit_stream(state, None)
+
+    def _fail_states(self, states: list[ActiveState], exc: BaseException) -> None:
+        for state in states:
+            state.finished = True
+            if not state.ticket.future.done():
+                state.ticket.future.set_exception(exc)
+            if state.ticket.stream is not None:
+                try:
+                    state.ticket.stream.put_nowait(None)
+                except asyncio.QueueFull:
+                    pass
 
 
 def _sample_next(logits: torch.Tensor, temperature: float, top_p: float) -> list[int]:

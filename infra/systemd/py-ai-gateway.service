@@ -1,0 +1,20 @@
+[Unit]
+Description=py_ai_apis_gpt Rust gateway
+After=network-online.target qdrant.service py-ai-text-worker.service py-ai-ltx-worker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/workspace/py_ai_apis_gpt
+EnvironmentFile=/workspace/py_ai_apis_gpt/.env
+Environment=GATEWAY_BIND=0.0.0.0:8080
+Environment=RUNTIME_BACKEND=native
+ExecStart=/workspace/py_ai_apis_gpt/gateway-rs/target/release/gateway-rs
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=append:/workspace/py_ai_apis_gpt/runtime/logs/gateway.log
+StandardError=append:/workspace/py_ai_apis_gpt/runtime/logs/gateway.log
+
+[Install]
+WantedBy=multi-user.target

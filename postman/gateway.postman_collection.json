@@ -45,7 +45,7 @@
               "script": {
                 "type": "text/javascript",
                 "exec": [
-                  "if (pm.response.code === 201) {",
+                  "if (pm.response.code === 200) {",
                   "  const body = pm.response.json();",
                   "  pm.environment.set('access_token', body.access_token);",
                   "}"
@@ -228,6 +228,33 @@
           }
         },
         {
+          "name": "Create 4K Upscaled Video Job",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const body = pm.response.json();",
+                  "  pm.environment.set('video_job_id', body.job_id);",
+                  "  pm.environment.set('video_r2_key', body.r2_key);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"mode\": \"text_to_video\",\n  \"prompt\": \"A premium automotive hero shot of an electric coupe driving through light rain on a mountain road, controlled camera car motion, realistic reflections\",\n  \"negative_prompt\": \"blur, low quality, warped wheels, flicker\",\n  \"width\": 3840,\n  \"height\": 2160,\n  \"num_frames\": 121,\n  \"frame_rate\": 24,\n  \"guidance_scale\": 7.5,\n  \"num_inference_steps\": 40\n}"
+            },
+            "url": "{{base_url}}/v1/video/jobs"
+          }
+        },
+        {
           "name": "Cancel Video Job",
           "request": {
             "method": "DELETE",
@@ -283,6 +310,37 @@
           }
         },
         {
+          "name": "Gateway Logs",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Admin-Key", "value": "{{admin_key}}" }],
+            "url": "{{base_url}}/admin/logs/gateway?lines=200"
+          }
+        },
+        {
+          "name": "Users",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Admin-Key", "value": "{{admin_key}}" }],
+            "url": "{{base_url}}/admin/users"
+          }
+        },
+        {
+          "name": "Set User Role",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "X-Admin-Key", "value": "{{admin_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"role\": \"user\"\n}"
+            },
+            "url": "{{base_url}}/admin/users/{{user_id}}/role"
+          }
+        },
+        {
           "name": "Start Text Worker",
           "request": {
             "method": "POST",
@@ -310,4 +368,3 @@
     }
   ]
 }
-

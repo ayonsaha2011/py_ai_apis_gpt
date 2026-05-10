@@ -242,13 +242,13 @@ def _distilled_pipeline() -> Any:
     )
 
 
-async def run_ltx_job(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> Path:
+async def run_ltx_job(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> tuple[Path, dict[str, Any]]:
     job_dir = output_path.parent
     job_dir.mkdir(parents=True, exist_ok=True)
     return await asyncio.to_thread(_run_sync, job_id, req, seed, output_path)
 
 
-def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> Path:
+def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> tuple[Path, dict[str, Any]]:
     from ltx_core.components.guiders import MultiModalGuiderParams
     from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
     from ltx_pipelines.utils.media_io import encode_video
@@ -298,7 +298,16 @@ def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> P
     )
     if upscale_target:
         _upscale_video(encode_path, output_path, upscale_target[0], upscale_target[1])
-    return output_path
+    metadata = {
+        "upscaled": bool(upscale_target),
+        "render_width": generation_req.width,
+        "render_height": generation_req.height,
+        "output_width": req.width,
+        "output_height": req.height,
+        "num_frames": req.num_frames,
+        "frame_rate": req.frame_rate or 24.0,
+    }
+    return output_path, metadata
 
 
 def _generation_plan(req: VideoRequest) -> tuple[VideoRequest, tuple[int, int] | None]:

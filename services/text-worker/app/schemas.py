@@ -33,7 +33,7 @@ class RagCollectionRequest(BaseModel):
 
 class RagIngestRequest(BaseModel):
     collection: str
+    document_id: str
     texts: list[str]
     source_name: str = "api"
     metadata: dict = Field(default_factory=dict)
-

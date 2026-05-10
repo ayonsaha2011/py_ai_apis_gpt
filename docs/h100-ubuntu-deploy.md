@@ -47,6 +47,21 @@ AI_PYTHON_BIN=python3.12
 
 Set real values for `ADMIN_API_KEY`, `SERVICE_API_KEY`, Turso, and R2 before exposing the service.
 
+Gemma is a gated Hugging Face model. Before running model download, use a token from an account that has accepted the model terms:
+
+```bash
+HF_TOKEN=hf_your_read_token
+```
+
+For a local smoke run without Turso, set:
+
+```bash
+TURSO_DB_URL=file:storage/gateway.db
+TURSO_AUTH_TOKEN=
+```
+
+For production Turso, both `TURSO_DB_URL=libsql://...` and `TURSO_AUTH_TOKEN=...` must be real values. The deploy script now rejects placeholders before starting services.
+
 ## Service Control
 
 ```bash
@@ -80,8 +95,31 @@ For the full 22B BF16 H100 profile, use the safer SD budget:
 
 For HD on H100, use `mode=distilled` with `1024x576` and `121` frames. For 10-second HD clips, use the H200 profile.
 
+4K support on H100 is output-only upscaling. The request can use `3840x2160` for 5 seconds, but the worker records a safe native render size in job metadata:
+
+- `metadata.upscaled=true`
+- `metadata.render_width` and `metadata.render_height`: native GPU render size
+- `metadata.output_width=3840`
+- `metadata.output_height=2160`
+
+## Systemd Mode
+
+The native script is the default operator interface. For systemd-managed production, copy the prepared units after `deploy` succeeds:
+
+```bash
+sudo cp infra/systemd/py-ai-*.service /etc/systemd/system/
+sudo cp infra/systemd/py-ai-apis-gpt.logrotate /etc/logrotate.d/py-ai-apis-gpt
+sudo systemctl daemon-reload
+sudo systemctl enable --now py-ai-text-worker py-ai-ltx-worker py-ai-gateway
+```
+
+The units expect the repo at `/workspace/py_ai_apis_gpt`; edit `WorkingDirectory`, `EnvironmentFile`, and `ExecStart` if the checkout path differs.
+
 ## Operational Notes
 
 - Keep `LTX_LOCAL_MAX_HEAVY_JOBS=1` on a single H100.
 - The gateway can accept many clients concurrently, but video work is queued and admitted by the GPU budget.
 - Video outputs are never response-cached. Each request receives a unique job ID, R2 key, and effective seed.
+- Supported H100 outcomes:
+  - Full 22B BF16: native SD 5 seconds, 4K output via upscale 5 seconds.
+  - Distilled/specialized: native HD 5 seconds, 4K output via upscale 5 seconds.

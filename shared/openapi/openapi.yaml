@@ -1,23 +1,72 @@
 openapi: 3.1.0
 info:
   title: py_ai_apis_gpt Gateway API
-  version: 0.1.0
+  version: 0.2.0
+servers:
+  - url: http://127.0.0.1:8080
+security:
+  - bearerAuth: []
 paths:
   /auth/register:
     post:
       summary: Register a user and create an opaque bearer session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRequest"
+      responses:
+        "200":
+          description: Session token. First user or ADMIN_EMAILS match receives role admin.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
   /auth/login:
     post:
       summary: Create an opaque bearer session.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthRequest"
+      responses:
+        "200":
+          description: Session token.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
   /auth/logout:
     post:
       summary: Revoke the current bearer session.
+      responses:
+        "204":
+          description: Session revoked.
   /auth/me:
     get:
-      summary: Return the authenticated user.
+      summary: Return the authenticated user and role.
+      responses:
+        "200":
+          description: Current user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
   /v1/chat/completions:
     post:
       summary: OpenAI-compatible chat completions with optional streaming and RAG.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChatRequest"
+      responses:
+        "200":
+          description: Chat completion or SSE stream.
   /rag/collections:
     get:
       summary: List per-user RAG collections.
@@ -26,9 +75,14 @@ paths:
   /rag/ingest:
     post:
       summary: Ingest text into a per-user RAG collection.
+      responses:
+        "200":
+          description: Stable gateway document ID and chunk count.
   /rag/documents/{id}:
     delete:
-      summary: Delete a per-user RAG document from its collection.
+      summary: Delete a per-user RAG document from DB and Qdrant by stable document_id.
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
   /history/sessions:
     get:
       summary: List per-user chat sessions.
@@ -37,30 +91,247 @@ paths:
       summary: List per-user chat messages.
   /history/videos:
     get:
-      summary: List per-user video jobs.
+      summary: List per-user video jobs with seeds, R2 keys, and 4K metadata.
   /v1/video/jobs:
     post:
       summary: Submit an LTX-2.3 video generation job.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/VideoJobRequest"
+      responses:
+        "202":
+          description: Queued job. Video outputs are never response-cached.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VideoJobQueued"
   /v1/video/jobs/{id}:
     get:
       summary: Get video job state.
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      responses:
+        "200":
+          description: Video job status.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/VideoJobStatus"
     delete:
       summary: Cancel a queued or running video job.
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
   /v1/video/jobs/{id}/events:
     get:
       summary: Stream video job state changes using SSE.
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
   /admin/gpus:
     get:
-      summary: List visible NVIDIA GPUs.
+      summary: List visible NVIDIA GPUs. Requires admin bearer role or x-admin-key.
   /admin/services:
     get:
-      summary: List runtime-managed services.
+      summary: List runtime-managed services. Requires admin.
+  /admin/logs/{service}:
+    get:
+      summary: Tail redacted service logs. Requires admin.
+      parameters:
+        - name: service
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [gateway, text, ltx, qdrant]
+        - name: lines
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 2000
+  /admin/users:
+    get:
+      summary: List users and roles. Requires admin bearer role or x-admin-key.
+  /admin/users/{id}/role:
+    patch:
+      summary: Promote or demote a user role. Requires admin.
+      parameters:
+        - $ref: "#/components/parameters/IdPath"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [role]
+              properties:
+                role:
+                  type: string
+                  enum: [admin, user]
   /admin/services/{name}/start:
     post:
-      summary: Start a service through the configured runtime backend.
+      summary: Start a service through the configured runtime backend. Requires admin.
   /admin/services/{name}/stop:
     post:
-      summary: Stop a service through the configured runtime backend.
+      summary: Stop a service through the configured runtime backend. Requires admin.
   /admin/models/{model_id}/start:
     post:
-      summary: Load a configurable text model on the text worker.
+      summary: Load a configurable text model on the text worker. Requires admin.
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    IdPath:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    AuthRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 12
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in, role]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          const: bearer
+        expires_in:
+          type: integer
+        role:
+          type: string
+          enum: [admin, user]
+    User:
+      type: object
+      properties:
+        user_id:
+          type: string
+        email:
+          type: string
+        role:
+          type: string
+        created_at:
+          type: integer
+    ChatRequest:
+      type: object
+      required: [messages]
+      properties:
+        model:
+          type: string
+        stream:
+          type: boolean
+        session_id:
+          type: string
+        use_rag:
+          type: boolean
+        rag_collection:
+          type: string
+        messages:
+          type: array
+          items:
+            type: object
+            required: [role, content]
+            properties:
+              role:
+                type: string
+              content:
+                type: string
+    VideoJobRequest:
+      type: object
+      required: [mode, prompt, width, height, num_frames]
+      properties:
+        mode:
+          type: string
+          enum: [text_to_video, image_to_video, video_to_video, audio_to_video, keyframe_interpolation, retake, distilled, hdr]
+        prompt:
+          type: string
+        width:
+          type: integer
+          description: Output width. 4K is output-only upscale unless future profiles allow native 4K.
+        height:
+          type: integer
+        num_frames:
+          type: integer
+          description: Must satisfy 8k+1.
+        image_url:
+          type: string
+        video_url:
+          type: string
+        audio_url:
+          type: string
+        keyframe_urls:
+          type: array
+          items:
+            type: string
+    VideoMetadata:
+      type: object
+      properties:
+        upscaled:
+          type: boolean
+        render_width:
+          type: integer
+        render_height:
+          type: integer
+        output_width:
+          type: integer
+        output_height:
+          type: integer
+    VideoJobQueued:
+      type: object
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          const: queued
+        effective_seed:
+          type: integer
+        r2_key:
+          type: string
+        created_at:
+          type: integer
+    VideoJobStatus:
+      type: object
+      properties:
+        job_id:
+          type: string
+        status:
+          type: string
+          enum: [queued, materializing_inputs, generating, encoding, upscaling, uploading, complete, failed, cancelled]
+        progress:
+          type: number
+        result_url:
+          type: string
+          nullable: true
+        error:
+          type: string
+          nullable: true
+        effective_seed:
+          type: integer
+        r2_key:
+          type: string
+        metadata:
+          $ref: "#/components/schemas/VideoMetadata"
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: object
+          properties:
+            message:
+              type: string

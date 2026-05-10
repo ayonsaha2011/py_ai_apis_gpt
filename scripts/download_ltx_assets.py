@@ -84,6 +84,56 @@ def download_snapshot(spec: DownloadSpec, cache_dir: Path | None, max_workers: i
         allow_patterns=spec.allow_patterns,
         cache_dir=cache_dir,
         max_workers=max_workers,
+        token=hf_token(),
+    )
+
+
+def hf_token() -> str | None:
+    token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    if token and token.startswith("replace-with"):
+        raise SystemExit(
+            "HF_TOKEN is still a placeholder. Set HF_TOKEN to a Hugging Face token that has accepted access "
+            "to google/gemma-3-12b-it-qat-q4_0-unquantized, or run `huggingface-cli login`."
+        )
+    if token:
+        return token
+    try:
+        from huggingface_hub import get_token
+
+        return get_token()
+    except Exception:
+        return None
+
+
+def preflight_repo_access(specs: list[DownloadSpec]) -> None:
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+
+    token = hf_token()
+    api = HfApi(token=token)
+    for spec in specs:
+        try:
+            api.model_info(spec.repo_id, token=token)
+        except GatedRepoError as exc:
+            raise SystemExit(_gated_repo_message(spec.repo_id)) from exc
+        except RepositoryNotFoundError as exc:
+            raise SystemExit(f"Cannot find Hugging Face repo {spec.repo_id}. Check the model id and HF_TOKEN access.") from exc
+        except Exception as exc:
+            if "401" in str(exc) or "Unauthorized" in str(exc):
+                raise SystemExit(_gated_repo_message(spec.repo_id)) from exc
+            raise
+
+
+def _gated_repo_message(repo_id: str) -> str:
+    return (
+        f"Cannot access gated Hugging Face repo {repo_id}.\n"
+        "Fix:\n"
+        f"  1. Open https://huggingface.co/{repo_id} and accept the model access terms with the account that owns your token.\n"
+        "  2. Put a read token in the deployment env file, for example:\n"
+        "       HF_TOKEN=hf_your_read_token\n"
+        "     or login on the server with:\n"
+        "       huggingface-cli login\n"
+        "  3. Re-run the deploy command.\n"
     )
 
 
@@ -104,9 +154,13 @@ def main() -> None:
     parser.add_argument("--hf-cache-dir", default=os.environ.get("HF_HOME"), help="HF_HOME/HF cache root on a large volume.")
     parser.add_argument("--min-free-gb", type=float, default=float(os.environ.get("MODEL_MIN_FREE_GB", "120")))
     parser.add_argument("--max-workers", type=int, default=int(os.environ.get("HF_HUB_DOWNLOAD_THREADS", "4")))
+    parser.add_argument("--hf-token", default=os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN"))
     parser.add_argument("--skip-gemma", action="store_true")
     parser.add_argument("--skip-text", action="store_true")
     args = parser.parse_args()
+
+    if args.hf_token:
+        os.environ["HF_TOKEN"] = args.hf_token
 
     model_dir = resolve_path(args.model_dir)
     text_model_dir = resolve_path(args.text_model_dir)
@@ -124,6 +178,7 @@ def main() -> None:
     if hf_cache is not None:
         free_space_paths.append(hf_cache)
     check_free_space(free_space_paths, args.min_free_gb)
+    preflight_repo_access(specs)
 
     for spec in specs:
         download_snapshot(spec, hf_cache, args.max_workers)

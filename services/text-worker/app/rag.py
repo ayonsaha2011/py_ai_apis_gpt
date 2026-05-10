@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import uuid
 from typing import Any
 
 from qdrant_client import AsyncQdrantClient
@@ -35,7 +34,14 @@ async def ensure_collection(collection: str) -> None:
         )
 
 
-async def ingest(collection: str, texts: list[str], source_name: str, user_id: str, metadata: dict[str, Any]) -> int:
+async def ingest(
+    collection: str,
+    document_id: str,
+    texts: list[str],
+    source_name: str,
+    user_id: str,
+    metadata: dict[str, Any],
+) -> int:
     await ensure_collection(collection)
     chunks = []
     for text in texts:
@@ -44,16 +50,15 @@ async def ingest(collection: str, texts: list[str], source_name: str, user_id: s
         return 0
     vectors = _embed(chunks)
     points = []
-    doc_id = str(uuid.uuid7()) if hasattr(uuid, "uuid7") else str(uuid.uuid4())
     for idx, (chunk, vector) in enumerate(zip(chunks, vectors, strict=True)):
-        stable = hashlib.sha256(f"{user_id}:{source_name}:{idx}:{chunk}".encode()).hexdigest()
+        stable = hashlib.sha256(f"{user_id}:{document_id}:{idx}:{chunk}".encode()).hexdigest()
         points.append(
             qmodels.PointStruct(
                 id=stable,
                 vector=vector,
                 payload={
                     "user_id": user_id,
-                    "document_id": doc_id,
+                    "document_id": document_id,
                     "source_name": source_name,
                     "text": chunk,
                     "metadata": metadata,
@@ -64,7 +69,7 @@ async def ingest(collection: str, texts: list[str], source_name: str, user_id: s
     return len(points)
 
 
-async def retrieve(collection: str, query: str, top_k: int | None = None) -> list[str]:
+async def retrieve(collection: str, query: str, top_k: int | None = None) -> list[dict[str, Any]]:
     await ensure_collection(collection)
     vector = _embed([query])[0]
     hits = await _require_client().search(
@@ -73,15 +78,27 @@ async def retrieve(collection: str, query: str, top_k: int | None = None) -> lis
         limit=top_k or settings.rag_top_k,
         score_threshold=settings.rag_score_threshold,
     )
-    return [str(hit.payload.get("text", "")) for hit in hits if hit.payload]
+    return [
+        {
+            "text": str(hit.payload.get("text", "")),
+            "document_id": str(hit.payload.get("document_id", "")),
+            "source_name": str(hit.payload.get("source_name", "")),
+            "score": float(hit.score),
+        }
+        for hit in hits
+        if hit.payload
+    ]
 
 
-async def delete_document(collection: str, document_id: str) -> None:
+async def delete_document(collection: str, document_id: str, user_id: str) -> None:
     await _require_client().delete(
         collection_name=collection,
         points_selector=qmodels.FilterSelector(
             filter=qmodels.Filter(
-                must=[qmodels.FieldCondition(key="document_id", match=qmodels.MatchValue(value=document_id))]
+                must=[
+                    qmodels.FieldCondition(key="document_id", match=qmodels.MatchValue(value=document_id)),
+                    qmodels.FieldCondition(key="user_id", match=qmodels.MatchValue(value=user_id)),
+                ]
             )
         ),
     )
@@ -113,4 +130,3 @@ def _require_client() -> AsyncQdrantClient:
     if _client is None:
         raise RuntimeError("Qdrant client not initialized")
     return _client
-

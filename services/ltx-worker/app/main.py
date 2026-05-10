@@ -60,14 +60,17 @@ async def run_job(body: InternalJobRequest, x_service_key: str | None = Header(d
         async with _gpu_lock:
             if cancel_event.is_set():
                 raise HTTPException(status_code=409, detail="job cancelled before start")
-            req = await materialize_inputs(body.request, job_dir)
+            try:
+                req = await materialize_inputs(body.request, job_dir)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
             if cancel_event.is_set():
                 raise HTTPException(status_code=409, detail="job cancelled after input materialization")
-            await run_ltx_job(body.job_id, req, body.effective_seed, output_path)
+            output_path, metadata = await run_ltx_job(body.job_id, req, body.effective_seed, output_path)
             if cancel_event.is_set():
                 raise HTTPException(status_code=409, detail="job cancelled after generation")
             result_url = await store_video(output_path, body.r2_key)
-            return {"job_id": body.job_id, "status": "complete", "result_url": result_url}
+            return {"job_id": body.job_id, "status": "complete", "result_url": result_url, "metadata": metadata}
     except HTTPException:
         raise
     except Exception as exc:

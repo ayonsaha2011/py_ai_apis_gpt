@@ -61,11 +61,25 @@ async def chat_completions(
     _check_service_key(x_service_key)
     body = await request.json()
     req = ChatRequest.model_validate(body)
+    rag_audit: dict | None = None
     if req.use_rag and x_rag_qdrant_collection:
         last_user = next((m.content for m in reversed(req.messages) if m.role == "user"), "")
         if last_user:
-            chunks = await retrieve(x_rag_qdrant_collection, last_user)
-            if chunks:
+            hits = await retrieve(x_rag_qdrant_collection, last_user)
+            if hits:
+                chunks = [hit["text"] for hit in hits if hit.get("text")]
+                rag_audit = {
+                    "collection": x_rag_qdrant_collection,
+                    "document_ids": sorted({hit["document_id"] for hit in hits if hit.get("document_id")}),
+                    "hits": [
+                        {
+                            "document_id": hit.get("document_id"),
+                            "source_name": hit.get("source_name"),
+                            "score": hit.get("score"),
+                        }
+                        for hit in hits
+                    ],
+                }
                 req.messages.insert(
                     0,
                     ChatMessage(
@@ -77,6 +91,7 @@ async def chat_completions(
     model_name = req.model or scheduler.model_id
     completion_id = f"chatcmpl-{uuid.uuid4().hex}"
     created = int(time.time())
+    headers = {"X-RAG-Audit": json.dumps(rag_audit)} if rag_audit else {}
     if req.stream:
         async def events():
             async for token in scheduler.stream(req):
@@ -90,7 +105,11 @@ async def chat_completions(
                 yield f"data: {json.dumps(chunk)}\n\n"
             yield "data: [DONE]\n\n"
 
-        return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache"})
+        return StreamingResponse(
+            events(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", **headers},
+        )
 
     text = await scheduler.submit(req)
     return JSONResponse(
@@ -100,7 +119,8 @@ async def chat_completions(
             "created": created,
             "model": model_name,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": text}, "finish_reason": "stop"}],
-        }
+        },
+        headers=headers,
     )
 
 
@@ -120,8 +140,8 @@ async def rag_ingest(
     _check_service_key(x_service_key)
     if not x_user_id:
         raise HTTPException(status_code=401, detail="x-user-id required")
-    count = await ingest(body.collection, body.texts, body.source_name, x_user_id, body.metadata)
-    return {"collection": body.collection, "ingested_chunks": count}
+    count = await ingest(body.collection, body.document_id, body.texts, body.source_name, x_user_id, body.metadata)
+    return {"collection": body.collection, "document_id": body.document_id, "ingested_chunks": count}
 
 
 @app.delete("/rag/documents/{document_id}")
@@ -129,11 +149,14 @@ async def rag_delete(
     document_id: str,
     x_service_key: str | None = Header(default=None),
     x_rag_qdrant_collection: str | None = Header(default=None),
+    x_user_id: str | None = Header(default=None),
 ) -> dict:
     _check_service_key(x_service_key)
     if not x_rag_qdrant_collection:
         raise HTTPException(status_code=422, detail="x-rag-qdrant-collection required")
+    if not x_user_id:
+        raise HTTPException(status_code=401, detail="x-user-id required")
     from .rag import delete_document
 
-    await delete_document(x_rag_qdrant_collection, document_id)
+    await delete_document(x_rag_qdrant_collection, document_id, x_user_id)
     return {"document_id": document_id, "status": "deleted"}

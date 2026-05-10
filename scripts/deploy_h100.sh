@@ -238,7 +238,14 @@ install_python_deps() {
 }
 
 download_models() {
+  require_huggingface_access
   info "Downloading LTX-2.3 and Gemma model assets..."
+  local hf_args=()
+  if [[ -n "${HF_TOKEN:-}" && "${HF_TOKEN:-}" != replace-* ]]; then
+    hf_args+=(--hf-token "$HF_TOKEN")
+  elif [[ -n "${HUGGING_FACE_HUB_TOKEN:-}" && "${HUGGING_FACE_HUB_TOKEN:-}" != replace-* ]]; then
+    hf_args+=(--hf-token "$HUGGING_FACE_HUB_TOKEN")
+  fi
   "$VENV_DIR/bin/python" "$ROOT_DIR/scripts/download_ltx_assets.py" \
     --model-dir "$(repo_path "${LTX_MODEL_DIR:-models/ltx-2.3}")" \
     --text-model-id "${TEXT_MODEL_ID:-google/gemma-3-12b-it-qat-q4_0-unquantized}" \
@@ -246,7 +253,8 @@ download_models() {
     --ltx-gemma-root "$(repo_path "${LTX_GEMMA_ROOT:-${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}}")" \
     --hf-cache-dir "${HF_HOME:-$ROOT_DIR/models/.cache/huggingface}" \
     --min-free-gb "${MODEL_MIN_FREE_GB:-120}" \
-    --max-workers "${HF_HUB_DOWNLOAD_THREADS:-4}"
+    --max-workers "${HF_HUB_DOWNLOAD_THREADS:-4}" \
+    "${hf_args[@]}"
 }
 
 build_gateway() {
@@ -270,6 +278,28 @@ require_secret() {
   local key="$1"
   local value="${!key:-}"
   [[ -n "$value" && "$value" != replace-* ]] || fail "$key must be set to a real value in $ENV_FILE"
+}
+
+require_huggingface_access() {
+  local token="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
+  if [[ -n "$token" && "$token" == replace-* ]]; then
+    fail "HF_TOKEN is still a placeholder in $ENV_FILE. Set HF_TOKEN to a Hugging Face read token with access to google/gemma-3-12b-it-qat-q4_0-unquantized, or remove it and run huggingface-cli login."
+  fi
+  if [[ -z "$token" ]]; then
+    warn "HF_TOKEN is not set. The downloader will use any token from huggingface-cli login; Gemma downloads will fail if no cached token has accepted access."
+  fi
+}
+
+check_gateway_database_env() {
+  local url="${TURSO_DB_URL:-}"
+  local token="${TURSO_AUTH_TOKEN:-}"
+  [[ -n "$url" ]] || fail "TURSO_DB_URL must be set. Use a real libsql:// URL with TURSO_AUTH_TOKEN, or file:storage/gateway.db for a local smoke run."
+  if [[ "$url" == *replace-* ]]; then
+    fail "TURSO_DB_URL is still a placeholder in $ENV_FILE. Set a real Turso URL or use TURSO_DB_URL=file:storage/gateway.db for local testing."
+  fi
+  if [[ "$url" == libsql://* ]]; then
+    [[ -n "$token" && "$token" != replace-* ]] || fail "TURSO_AUTH_TOKEN must be set for TURSO_DB_URL=$url. For local testing, set TURSO_DB_URL=file:storage/gateway.db and leave TURSO_AUTH_TOKEN empty."
+  fi
 }
 
 check_os() {
@@ -362,6 +392,7 @@ check_env() {
   require_env_file
   require_secret ADMIN_API_KEY
   require_secret SERVICE_API_KEY
+  check_gateway_database_env
   [[ "${LTX_QUANTIZATION:-none}" == "none" ]] || fail "Full 22B BF16 profile requires LTX_QUANTIZATION=none"
   [[ "${TEXT_MODEL_ID:-}" == "google/gemma-3-12b-it-qat-q4_0-unquantized" ]] || fail "Expected TEXT_MODEL_ID=google/gemma-3-12b-it-qat-q4_0-unquantized"
 }

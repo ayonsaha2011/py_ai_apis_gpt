@@ -4,7 +4,6 @@ import {
   CheckCircle2,
   Clock3,
   Database,
-  FileText,
   History,
   Image as ImageIcon,
   KeyRound,
@@ -14,7 +13,6 @@ import {
   Music2,
   Play,
   RefreshCw,
-  RotateCw,
   Send,
   Server,
   Settings,
@@ -29,7 +27,12 @@ import {
   Wand2,
 } from "lucide-react";
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
-import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { errorMessage, safeJson } from "./api";
+import { DataView, EmptyState, NumberField, QualityPill, SetupRow, StatusBadge, TextField, Toast, Toggle } from "./components/ui";
+import { AdminPage } from "./routes/AdminPage";
+import { AuthPage } from "./routes/AuthPage";
+import type { ChatMessage, Config, RagCollection, User, VideoJob } from "./types";
 
 const defaultModel = "google/gemma-3-12b-it-qat-q4_0-unquantized";
 const videoModes = [
@@ -160,49 +163,6 @@ const videoExamples: VideoExample[] = [
   },
 ];
 
-type Config = {
-  apiBase: string;
-  token: string;
-  adminKey: string;
-};
-
-type User = {
-  user_id: string;
-  email: string;
-  role: "admin" | "user" | string;
-  created_at: number;
-};
-
-type ChatMessage = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-};
-
-type VideoJob = {
-  job_id: string;
-  status: string;
-  progress?: number;
-  result_url?: string | null;
-  error?: string | null;
-  created_at?: number;
-  updated_at?: number;
-};
-
-type RagCollection = {
-  id?: string;
-  name: string;
-  qdrant_name: string;
-  created_at?: number;
-};
-
-type ServiceSnapshot = {
-  name?: string;
-  status?: string;
-  pid?: number;
-  [key: string]: unknown;
-};
-
 function savedConfig(): Config {
   return {
     apiBase: localStorage.getItem("apiBase") || import.meta.env.VITE_API_BASE || window.location.origin,
@@ -213,25 +173,6 @@ function savedConfig(): Config {
 
 function newId(prefix: string) {
   return `${prefix}-${crypto.randomUUID?.() ?? crypto.getRandomValues(new Uint32Array(4)).join("-")}`;
-}
-
-function safeJson(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
-function errorMessage(value: unknown): string {
-  if (value instanceof Error) return value.message;
-  if (typeof value === "string") return value;
-  if (value && typeof value === "object") {
-    const object = value as Record<string, unknown>;
-    const nested = object.error && typeof object.error === "object" ? (object.error as Record<string, unknown>) : null;
-    return String(nested?.message || object.detail || object.message || JSON.stringify(value));
-  }
-  return "Request failed";
 }
 
 function formatDate(ts?: number) {
@@ -545,10 +486,12 @@ function Sidebar({
             API Base
             <input className="input border-white/[0.15] bg-white/10 text-white placeholder:text-slate-400" value={draft.apiBase} onChange={(event) => setDraft({ ...draft, apiBase: event.target.value })} />
           </label>
-          <label className="field text-slate-300">
-            Session
-            <input className="input border-white/[0.15] bg-white/10 text-white placeholder:text-slate-400" value={draft.token} onChange={(event) => setDraft({ ...draft, token: event.target.value })} />
-          </label>
+          {isAdmin ? (
+            <label className="field text-slate-300">
+              Session
+              <input className="input border-white/[0.15] bg-white/10 text-white placeholder:text-slate-400" value={draft.token} onChange={(event) => setDraft({ ...draft, token: event.target.value })} />
+            </label>
+          ) : null}
           {isAdmin ? (
             <label className="field text-slate-300">
               Admin Key
@@ -622,70 +565,6 @@ function Topbar({
         )}
       </div>
     </header>
-  );
-}
-
-function AuthPage({
-  mode,
-  busy,
-  notify,
-  onAuth,
-}: {
-  mode: "login" | "register";
-  busy: boolean;
-  notify: (message: string) => void;
-  onAuth: (email: string, password: string) => Promise<void>;
-}) {
-  const navigate = useNavigate();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const isRegister = mode === "register";
-
-  async function submit(event: FormEvent) {
-    event.preventDefault();
-    try {
-      await onAuth(email.trim(), password);
-      navigate("/chat");
-    } catch (err) {
-      notify(errorMessage(err));
-    }
-  }
-
-  return (
-    <section className="grid min-h-[62vh] place-items-center">
-      <form className="surface grid w-full max-w-[520px] gap-5" onSubmit={submit}>
-        <div>
-          <div className="grid h-12 w-12 place-items-center rounded-lg bg-ocean text-white">
-            {isRegister ? <UserPlus size={22} /> : <KeyRound size={22} />}
-          </div>
-          <h2 className="mt-4 text-2xl font-semibold text-ink">{isRegister ? "Create account" : "Login"}</h2>
-          <p className="mt-1 text-sm text-muted">{isRegister ? "Create a gateway account for chat, RAG, video history, and artifacts." : "Use your gateway account to continue."}</p>
-        </div>
-
-        <div className="grid gap-3">
-          <label className="field">
-            Email
-            <input className="input" autoComplete="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
-          </label>
-          <label className="field">
-            Password
-            <input className="input" autoComplete={isRegister ? "new-password" : "current-password"} required minLength={8} type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
-          </label>
-        </div>
-
-        <button className="btn btn-primary w-full" type="submit" disabled={busy}>
-          {busy ? <Loader2 size={16} className="animate-spin" /> : isRegister ? <UserPlus size={16} /> : <KeyRound size={16} />}
-          {isRegister ? "Create account" : "Login"}
-        </button>
-
-        <div className="text-center text-sm text-muted">
-          {isRegister ? "Already have an account?" : "Need an account?"}{" "}
-          <Link className="font-semibold text-ocean" to={isRegister ? "/login" : "/register"}>
-            {isRegister ? "Login" : "Register"}
-          </Link>
-        </div>
-      </form>
-    </section>
   );
 }
 
@@ -952,11 +831,18 @@ function VideoPage({
     if (form.retakeEnd) payload.retake_end_time = Number(form.retakeEnd);
 
     try {
-      const queued = await request<{ job_id: string; status: string; created_at: number }>("/v1/video/jobs", {
+      const queued = await request<{ job_id: string; status: string; created_at: number; effective_seed?: number; r2_key?: string }>("/v1/video/jobs", {
         method: "POST",
         body: JSON.stringify(payload),
       });
-      const job = { job_id: queued.job_id, status: queued.status, progress: 0, created_at: queued.created_at };
+      const job = {
+        job_id: queued.job_id,
+        status: queued.status,
+        progress: 0,
+        created_at: queued.created_at,
+        effective_seed: queued.effective_seed,
+        r2_key: queued.r2_key,
+      };
       setJobs((current) => [job, ...current.filter((item) => item.job_id !== job.job_id)]);
       void watchVideoJob(apiBase, token, job.job_id, (update) => setJobs((current) => current.map((item) => (item.job_id === update.job_id ? { ...item, ...update } : item))));
       notify(`Queued ${queued.job_id}`);
@@ -1175,6 +1061,30 @@ function VideoPage({
               <div className="mt-3 h-2 overflow-hidden rounded-full bg-slate-200">
                 <div className="h-full bg-ocean" style={{ width: `${Math.round((job.progress || 0) * 100)}%` }} />
               </div>
+              <div className="mt-3 grid gap-2 lg:grid-cols-[minmax(0,1fr)_auto]">
+                <div className="flex flex-wrap gap-1.5">
+                  {videoStatusTimeline.map((status) => (
+                    <span key={status} className={`rounded-md border px-2 py-1 text-[11px] font-bold ${timelineActive(job.status, status) ? "border-ocean bg-ocean text-white" : "border-line bg-slate-50 text-muted"}`}>
+                      {status}
+                    </span>
+                  ))}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button className="btn px-2 py-1 text-xs" type="button" onClick={() => void copyText(job.job_id, notify)}>
+                    Copy job
+                  </button>
+                  {job.r2_key ? (
+                    <button className="btn px-2 py-1 text-xs" type="button" onClick={() => void copyText(job.r2_key || "", notify)}>
+                      Copy R2
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+              <div className="mt-3 grid gap-2 text-xs text-muted sm:grid-cols-3">
+                {job.effective_seed != null ? <SetupRow icon={<Sparkles size={15} />} label="Seed" value={String(job.effective_seed)} /> : null}
+                {job.metadata?.render_width && job.metadata?.render_height ? <SetupRow icon={<Clapperboard size={15} />} label="Render" value={`${job.metadata.render_width}x${job.metadata.render_height}`} /> : null}
+                {job.metadata?.output_width && job.metadata?.output_height ? <SetupRow icon={<ImageIcon size={15} />} label="Output" value={`${job.metadata.output_width}x${job.metadata.output_height}${job.metadata.upscaled ? " upscaled" : ""}`} /> : null}
+              </div>
               {job.result_url ? (
                 <a className="mt-3 block break-all text-sm font-semibold text-steel" href={job.result_url} target="_blank" rel="noreferrer">
                   {job.result_url}
@@ -1210,37 +1120,21 @@ function inputSummary(requirements: ReturnType<typeof videoRequirements>) {
   return items.length ? items.join(", ") : "prompt only";
 }
 
-function QualityPill({ ok, label }: { ok: boolean; label: string }) {
-  return (
-    <span className={`inline-flex min-h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-bold ${ok ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
-      {ok ? <CheckCircle2 size={14} /> : <Clock3 size={14} />}
-      {label}
-    </span>
-  );
+const videoStatusTimeline = ["queued", "materializing_inputs", "generating", "encoding", "upscaling", "uploading", "complete"];
+
+function timelineActive(current: string, step: string) {
+  const currentIndex = videoStatusTimeline.indexOf(current);
+  const stepIndex = videoStatusTimeline.indexOf(step);
+  return current === step || (currentIndex >= 0 && stepIndex >= 0 && stepIndex <= currentIndex);
 }
 
-function SetupRow({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between gap-3 rounded-md border border-line bg-slate-50 px-3 py-2">
-      <div className="flex items-center gap-2 text-muted">
-        {icon}
-        <span>{label}</span>
-      </div>
-      <span className="truncate font-semibold text-ink">{value}</span>
-    </div>
-  );
-}
-
-function StatusBadge({ status }: { status: string }) {
-  const normalized = status.toLowerCase();
-  const style = normalized === "complete"
-    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
-    : normalized === "failed"
-      ? "border-red-200 bg-red-50 text-red-700"
-      : normalized === "cancelled"
-        ? "border-slate-200 bg-slate-100 text-slate-600"
-        : "border-blue-200 bg-blue-50 text-blue-700";
-  return <span className={`rounded-md border px-2 py-0.5 font-bold ${style}`}>{status}</span>;
+async function copyText(value: string, notify: (message: string) => void) {
+  try {
+    await navigator.clipboard.writeText(value);
+    notify("Copied");
+  } catch {
+    notify(value);
+  }
 }
 
 async function watchVideoJob(apiBase: string, token: string, jobId: string, onUpdate: (job: VideoJob) => void) {
@@ -1406,191 +1300,6 @@ function HistoryPage({ request, notify }: { request: <T>(path: string, init?: Re
       </div>
       <DataView value={data} />
     </section>
-  );
-}
-
-function AdminPage({
-  adminRequest,
-  notify,
-}: {
-  adminRequest: <T>(path: string, init?: RequestInit) => Promise<T>;
-  notify: (message: string) => void;
-}) {
-  const [model, setModel] = useState(defaultModel);
-  const [output, setOutput] = useState<unknown>(null);
-  const [logService, setLogService] = useState("ltx");
-  const [logLines, setLogLines] = useState("200");
-  const [logs, setLogs] = useState<{ service?: string; path?: string; content?: string } | null>(null);
-
-  async function run(path: string, init?: RequestInit) {
-    try {
-      setOutput(await adminRequest(path, init));
-    } catch (err) {
-      notify(errorMessage(err));
-      setOutput({ error: errorMessage(err) });
-    }
-  }
-
-  async function startModel(event: FormEvent) {
-    event.preventDefault();
-    await run(`/admin/models/${encodeURIComponent(model)}/start`, { method: "POST" });
-  }
-
-  async function loadLogs() {
-    try {
-      const data = await adminRequest<{ service?: string; path?: string; content?: string }>(`/admin/logs/${logService}?lines=${encodeURIComponent(logLines)}`);
-      setLogs(data);
-    } catch (err) {
-      notify(errorMessage(err));
-      setLogs({ content: errorMessage(err) });
-    }
-  }
-
-  return (
-    <section className="grid gap-4">
-      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_460px]">
-        <div className="surface grid gap-4">
-          <div className="grid gap-2 sm:grid-cols-3">
-            <button className="btn min-h-12 justify-start" type="button" onClick={() => void run("/status")}>
-              <Activity size={16} />
-              Status
-            </button>
-            <button className="btn min-h-12 justify-start" type="button" onClick={() => void run("/admin/gpus")}>
-              <Server size={16} />
-              GPUs
-            </button>
-            <button className="btn min-h-12 justify-start" type="button" onClick={() => void run("/admin/services")}>
-              <Settings size={16} />
-              Services
-            </button>
-            <button className="btn min-h-12 justify-start" type="button" onClick={() => void run("/admin/services/text-worker/start", { method: "POST" })}>
-              <Play size={16} />
-              Start text
-            </button>
-            <button className="btn min-h-12 justify-start" type="button" onClick={() => void run("/admin/services/ltx-worker/start", { method: "POST" })}>
-              <Video size={16} />
-              Start LTX
-            </button>
-            <button className="btn btn-danger min-h-12 justify-start" type="button" onClick={() => void run("/admin/services/ltx-worker/stop", { method: "POST" })}>
-              <Square size={16} />
-              Stop LTX
-            </button>
-          </div>
-          <form className="grid gap-3 md:grid-cols-[minmax(0,520px)_auto]" onSubmit={startModel}>
-            <TextField label="Model" value={model} onChange={setModel} />
-            <button className="btn btn-primary self-end" type="submit">
-              <RotateCw size={16} />
-              Start Model
-            </button>
-          </form>
-        </div>
-
-        <div className="surface grid content-start gap-3">
-          <div className="flex items-center gap-2">
-            <FileText size={18} />
-            <h2 className="section-title">Server logs</h2>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-[1fr_110px]">
-            <label className="field">
-              Service
-              <select className="input" value={logService} onChange={(event) => setLogService(event.target.value)}>
-                <option value="gateway">gateway</option>
-                <option value="text">text</option>
-                <option value="ltx">ltx</option>
-                <option value="qdrant">qdrant</option>
-              </select>
-            </label>
-            <NumberField label="Lines" value={logLines} step={50} onChange={setLogLines} />
-          </div>
-          <button className="btn btn-primary justify-self-start" type="button" onClick={() => void loadLogs()}>
-            <RefreshCw size={16} />
-            Load logs
-          </button>
-          {logs ? (
-            <div className="grid gap-2">
-              <div className="truncate text-xs font-semibold text-muted">{logs.path || logs.service}</div>
-              <pre className="code-block max-h-[520px] whitespace-pre-wrap">{logs.content || ""}</pre>
-            </div>
-          ) : null}
-        </div>
-      </div>
-      <DataView value={output} />
-    </section>
-  );
-}
-
-function DataView({ value }: { value: unknown }) {
-  if (value == null) return <EmptyState icon={<Activity size={22} />} title="No data" />;
-  const arrays = flattenArrays(value);
-  if (arrays.length > 0) {
-    return (
-      <div className="grid gap-3">
-        {arrays.map((item, index) => (
-          <div key={index} className="rounded-lg border border-line bg-white p-4">
-            <pre className="max-h-72 overflow-auto text-xs leading-5 text-ink">{JSON.stringify(item, null, 2)}</pre>
-          </div>
-        ))}
-      </div>
-    );
-  }
-  return <pre className="code-block">{JSON.stringify(value, null, 2)}</pre>;
-}
-
-function flattenArrays(value: unknown): unknown[] {
-  if (Array.isArray(value)) return value;
-  if (!value || typeof value !== "object") return [];
-  return Object.values(value as Record<string, unknown>).flatMap((item) => (Array.isArray(item) ? item : []));
-}
-
-function TextField({ label, value, onChange }: { label: string; value: string; onChange: (value: string) => void }) {
-  return (
-    <label className="field">
-      {label}
-      <input className="input" value={value} onChange={(event) => onChange(event.target.value)} />
-    </label>
-  );
-}
-
-function NumberField({ label, value, step, onChange }: { label: string; value: string; step: number; onChange: (value: string) => void }) {
-  return (
-    <label className="field">
-      {label}
-      <input className="input" type="number" step={step} value={value} onChange={(event) => onChange(event.target.value)} />
-    </label>
-  );
-}
-
-function Toggle({ label, checked, onChange }: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
-  return (
-    <label className="flex min-h-10 items-center gap-2 self-end rounded-md border border-line bg-white px-3 text-sm font-semibold text-ink">
-      <input className="h-4 w-4 accent-ocean" type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
-      {label}
-    </label>
-  );
-}
-
-function EmptyState({ icon, title }: { icon: ReactNode; title: string }) {
-  return (
-    <div className="grid min-h-28 place-items-center rounded-lg border border-dashed border-line bg-white p-6 text-center text-muted">
-      <div className="grid gap-2 justify-items-center">
-        {icon}
-        <span className="text-sm font-semibold">{title}</span>
-      </div>
-    </div>
-  );
-}
-
-function Toast({ message }: { message: string }) {
-  return (
-    <div
-      className={`fixed bottom-4 right-4 z-50 max-w-md rounded-lg bg-[#101820] px-4 py-3 text-sm font-semibold text-white shadow-panel transition ${
-        message ? "translate-y-0 opacity-100" : "pointer-events-none translate-y-2 opacity-0"
-      }`}
-      role="status"
-      aria-live="polite"
-    >
-      {message}
-    </div>
   );
 }
 

@@ -127,6 +127,9 @@ pub struct VideoJobStatus {
     pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub effective_seed: i64,
+    pub r2_key: String,
+    pub metadata: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]

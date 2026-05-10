@@ -1,0 +1,8 @@
+/workspace/py_ai_apis_gpt/runtime/logs/*.log {
+    daily
+    rotate 14
+    compress
+    missingok
+    notifempty
+    copytruncate
+}

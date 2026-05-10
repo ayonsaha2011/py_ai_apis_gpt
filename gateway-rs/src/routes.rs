@@ -5,10 +5,11 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response, Sse},
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
 use futures_util::{StreamExt, TryStreamExt};
+use regex::Regex;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -57,6 +58,8 @@ pub fn router(state: AppState) -> Router {
         .route("/admin/gpus", get(admin_gpus))
         .route("/admin/services", get(admin_services))
         .route("/admin/logs/:service", get(admin_logs))
+        .route("/admin/users", get(admin_users))
+        .route("/admin/users/:id/role", patch(admin_update_user_role))
         .route("/admin/services/:name/start", post(admin_start_service))
         .route("/admin/services/:name/stop", post(admin_stop_service))
         .route("/admin/models/:model_id/start", post(admin_start_model))
@@ -89,6 +92,11 @@ struct HistoryQuery {
 #[derive(Debug, Deserialize)]
 struct LogsQuery {
     lines: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateUserRoleRequest {
+    role: String,
 }
 
 pub fn spawn_video_dispatcher(state: AppState) {
@@ -150,6 +158,15 @@ async fn register(
             state.config.session_ttl.as_secs(),
         )
         .await?;
+    state
+        .db
+        .create_audit_event(
+            Some(&user.id),
+            "auth.register",
+            "user",
+            &json!({"email": email, "role": user.role.clone()}),
+        )
+        .await?;
     Ok(Json(TokenResponse {
         access_token: token,
         token_type: "bearer",
@@ -178,6 +195,15 @@ async fn login(
             state.config.session_ttl.as_secs(),
         )
         .await?;
+    state
+        .db
+        .create_audit_event(
+            Some(&user.id),
+            "auth.login",
+            "session",
+            &json!({"email": user.email.clone()}),
+        )
+        .await?;
     Ok(Json(TokenResponse {
         access_token: token,
         token_type: "bearer",
@@ -192,7 +218,18 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Sta
         .and_then(|h| h.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .ok_or(AppError::Unauthorized)?;
-    state.db.revoke_session(&auth::hash_token(token)).await?;
+    let token_hash = auth::hash_token(token);
+    let user = state.db.user_by_session(&token_hash).await?;
+    state.db.revoke_session(&token_hash).await?;
+    state
+        .db
+        .create_audit_event(
+            user.as_ref().map(|u| u.id.as_str()),
+            "auth.logout",
+            "session",
+            &json!({}),
+        )
+        .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -252,7 +289,7 @@ async fn chat_completions(
 ) -> Result<Response> {
     let user = auth::require_user(&headers, &state).await?;
     let _wait = state.admission.admit_text_waiter()?;
-    let _heavy = state.admission.acquire_heavy().await?;
+    let _heavy = state.admission.acquire_text_heavy().await?;
 
     let session_id = req
         .session_id
@@ -297,6 +334,17 @@ async fn chat_completions(
     let worker_resp = worker_req.send().await?;
     let status =
         StatusCode::from_u16(worker_resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    if let Some(audit) = worker_resp
+        .headers()
+        .get("x-rag-audit")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+    {
+        state
+            .db
+            .create_audit_event(Some(&user.id), "rag.retrieve", "chat", &audit)
+            .await?;
+    }
 
     if req.stream.unwrap_or(false) {
         return stream_response(worker_resp, status);
@@ -341,6 +389,15 @@ async fn create_rag_collection(
             worker_resp.status()
         )));
     }
+    state
+        .db
+        .create_audit_event(
+            Some(&user.id),
+            "rag.collection.create",
+            name,
+            &json!({"collection_id": id, "qdrant_name": qdrant_name.clone()}),
+        )
+        .await?;
     Ok(Json(
         json!({"id": id, "name": name, "qdrant_name": qdrant_name}),
     ))
@@ -365,6 +422,9 @@ async fn rag_ingest(
     let Some(qdrant_name) = state.db.rag_qdrant_name(&user.id, &req.collection).await? else {
         return Err(AppError::NotFound);
     };
+    let document_id = Uuid::now_v7().to_string();
+    let source = req.source_name.clone().unwrap_or_else(|| "api".into());
+    let metadata_value = req.metadata.clone().unwrap_or_else(|| json!({}));
     let resp = state
         .http
         .post(format!("{}/rag/ingest", state.config.text_worker_url))
@@ -372,9 +432,10 @@ async fn rag_ingest(
         .header("x-user-id", &user.id)
         .json(&json!({
             "collection": qdrant_name,
+            "document_id": document_id,
             "texts": req.texts.clone(),
-            "source_name": req.source_name.clone().unwrap_or_else(|| "api".into()),
-            "metadata": req.metadata.clone().unwrap_or_else(|| json!({}))
+            "source_name": source.clone(),
+            "metadata": metadata_value.clone()
         }))
         .send()
         .await?;
@@ -385,12 +446,26 @@ async fn rag_ingest(
             .get("ingested_chunks")
             .and_then(Value::as_i64)
             .unwrap_or(0);
-        let source = req.source_name.unwrap_or_else(|| "api".into());
-        let metadata = serde_json::to_string(&req.metadata.unwrap_or_else(|| json!({})))
-            .unwrap_or_else(|_| "{}".into());
+        let metadata = serde_json::to_string(&metadata_value).unwrap_or_else(|_| "{}".into());
         let document_id = state
             .db
-            .create_rag_document(&user.id, &req.collection, &source, &metadata, count)
+            .create_rag_document(
+                &document_id,
+                &user.id,
+                &req.collection,
+                &source,
+                &metadata,
+                count,
+            )
+            .await?;
+        state
+            .db
+            .create_audit_event(
+                Some(&user.id),
+                "rag.ingest",
+                &req.collection,
+                &json!({"document_id": document_id, "chunks": count, "source_name": source.clone()}),
+            )
             .await?;
         return Ok((
             status,
@@ -418,13 +493,22 @@ async fn delete_rag_document(
             state.config.text_worker_url, id
         ))
         .header("x-service-key", &state.config.service_api_key)
-        .header("x-rag-qdrant-collection", collection)
+        .header("x-rag-qdrant-collection", collection.clone())
         .header("x-user-id", user_id.clone())
         .send()
         .await?;
     let status = StatusCode::from_u16(resp.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     if status.is_success() {
         state.db.mark_rag_document_deleted(&user_id, &id).await?;
+        state
+            .db
+            .create_audit_event(
+                Some(&user_id),
+                "rag.document.delete",
+                &id,
+                &json!({"qdrant_collection": collection}),
+            )
+            .await?;
     }
     proxy_complete_response(resp).await
 }
@@ -446,6 +530,22 @@ async fn create_video_job(
     state
         .db
         .create_video_job(&user.id, &job_id, &req, seed, &r2_key)
+        .await?;
+    state
+        .db
+        .create_audit_event(
+            Some(&user.id),
+            "video.submit",
+            &job_id.to_string(),
+            &json!({
+                "mode": req.mode.as_str(),
+                "effective_seed": seed,
+                "r2_key": r2_key.clone(),
+                "width": req.width,
+                "height": req.height,
+                "num_frames": req.num_frames
+            }),
+        )
         .await?;
     Ok((
         StatusCode::ACCEPTED,
@@ -489,6 +589,10 @@ async fn cancel_video_job(
         .header("x-service-key", &state.config.service_api_key)
         .send()
         .await;
+    state
+        .db
+        .create_audit_event(Some(&user.id), "video.cancel", &id, &json!({}))
+        .await?;
     Ok(Json(json!({"job_id": id, "status": "cancelling"})))
 }
 
@@ -535,6 +639,38 @@ async fn admin_services(State(state): State<AppState>, headers: HeaderMap) -> Re
     Ok(Json(json!({"services": state.runtime.list().await?})))
 }
 
+async fn admin_users(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>> {
+    auth::require_admin(&headers, &state).await?;
+    Ok(Json(json!({"users": state.db.list_users().await?})))
+}
+
+async fn admin_update_user_role(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<UpdateUserRoleRequest>,
+) -> Result<Json<Value>> {
+    auth::require_admin(&headers, &state).await?;
+    let role = req.role.trim();
+    if !matches!(role, "admin" | "user") {
+        return Err(AppError::BadRequest("role must be admin or user".into()));
+    }
+    if !state.db.update_user_role(&id, role).await? {
+        return Err(AppError::NotFound);
+    }
+    let actor = auth::require_user(&headers, &state).await.ok();
+    state
+        .db
+        .create_audit_event(
+            actor.as_ref().map(|user| user.id.as_str()),
+            "admin.user.role",
+            &id,
+            &json!({"role": role}),
+        )
+        .await?;
+    Ok(Json(json!({"user_id": id, "role": role})))
+}
+
 async fn admin_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -547,7 +683,7 @@ async fn admin_logs(
     };
     let lines = query.lines.unwrap_or(200).clamp(1, 2000);
     let path = state.config.log_dir.join(format!("{name}.log"));
-    let content = tail_file(&path, lines).await?;
+    let content = redact_log_secrets(&tail_file(&path, lines).await?);
     Ok(Json(json!({
         "service": name,
         "path": path,
@@ -562,7 +698,18 @@ async fn admin_start_service(
     Path(name): Path<String>,
 ) -> Result<Json<Value>> {
     auth::require_admin(&headers, &state).await?;
-    Ok(Json(json!(state.runtime.start(&name).await?)))
+    let actor = auth::require_user(&headers, &state).await.ok();
+    let result = state.runtime.start(&name).await?;
+    state
+        .db
+        .create_audit_event(
+            actor.as_ref().map(|user| user.id.as_str()),
+            "admin.service.start",
+            &name,
+            &json!({}),
+        )
+        .await?;
+    Ok(Json(json!(result)))
 }
 
 async fn admin_stop_service(
@@ -571,7 +718,18 @@ async fn admin_stop_service(
     Path(name): Path<String>,
 ) -> Result<Json<Value>> {
     auth::require_admin(&headers, &state).await?;
-    Ok(Json(json!(state.runtime.stop(&name).await?)))
+    let actor = auth::require_user(&headers, &state).await.ok();
+    let result = state.runtime.stop(&name).await?;
+    state
+        .db
+        .create_audit_event(
+            actor.as_ref().map(|user| user.id.as_str()),
+            "admin.service.stop",
+            &name,
+            &json!({}),
+        )
+        .await?;
+    Ok(Json(json!(result)))
 }
 
 async fn admin_start_model(
@@ -580,6 +738,7 @@ async fn admin_start_model(
     Path(model_id): Path<String>,
 ) -> Result<Json<Value>> {
     auth::require_admin(&headers, &state).await?;
+    let actor = auth::require_user(&headers, &state).await.ok();
     let resp = state
         .http
         .post(format!(
@@ -587,10 +746,20 @@ async fn admin_start_model(
             state.config.text_worker_url
         ))
         .header("x-service-key", &state.config.service_api_key)
-        .json(&json!({"model_id": model_id}))
+        .json(&json!({"model_id": model_id.clone()}))
         .send()
         .await?;
-    proxy_json(resp).await
+    let value = proxy_json(resp).await?;
+    state
+        .db
+        .create_audit_event(
+            actor.as_ref().map(|user| user.id.as_str()),
+            "admin.model.start",
+            &model_id,
+            &json!({}),
+        )
+        .await?;
+    Ok(value)
 }
 
 async fn dispatch_one_video_job(state: AppState) -> Result<()> {
@@ -599,17 +768,24 @@ async fn dispatch_one_video_job(state: AppState) -> Result<()> {
     else {
         return Ok(());
     };
-    let _permit = state.admission.acquire_heavy().await?;
-    state.db.mark_video_started(&job_id).await?;
+    let _permit = state.admission.acquire_video_heavy().await?;
+    state
+        .db
+        .mark_video_stage(&job_id, "materializing_inputs", 0.05)
+        .await?;
     let req: VideoJobRequest =
         serde_json::from_str(&params_json).map_err(|e| AppError::BadRequest(e.to_string()))?;
     let body = json!({
         "job_id": job_id,
         "request": req,
         "effective_seed": seed,
-        "r2_key": r2_key,
-        "user_id": user_id,
+        "r2_key": r2_key.clone(),
+        "user_id": user_id.clone(),
     });
+    state
+        .db
+        .mark_video_stage(&job_id, "generating", 0.10)
+        .await?;
     let result = state
         .http
         .post(format!("{}/internal/ltx/jobs", state.config.ltx_worker_url))
@@ -621,9 +797,19 @@ async fn dispatch_one_video_job(state: AppState) -> Result<()> {
         Ok(resp) if resp.status().is_success() => {
             let value = resp.json::<Value>().await.unwrap_or_else(|_| json!({}));
             let url = value.get("result_url").and_then(Value::as_str);
+            let metadata = value.get("metadata");
             state
                 .db
-                .update_video_job(&job_id, "complete", 1.0, url, None)
+                .update_video_job(&job_id, "complete", 1.0, url, None, metadata)
+                .await?;
+            state
+                .db
+                .create_audit_event(
+                    Some(&user_id),
+                    "video.complete",
+                    &job_id,
+                    &json!({"result_url": url, "r2_key": r2_key}),
+                )
                 .await?;
         }
         Ok(resp) => {
@@ -637,13 +823,14 @@ async fn dispatch_one_video_job(state: AppState) -> Result<()> {
                     0.0,
                     None,
                     Some(&format!("{status}: {text}")),
+                    None,
                 )
                 .await?;
         }
         Err(err) => {
             state
                 .db
-                .update_video_job(&job_id, "failed", 0.0, None, Some(&err.to_string()))
+                .update_video_job(&job_id, "failed", 0.0, None, Some(&err.to_string()), None)
                 .await?;
         }
     }
@@ -720,4 +907,39 @@ async fn tail_file(path: &std::path::Path, lines: usize) -> Result<String> {
         .collect::<Vec<_>>()
         .join("\n");
     Ok(selected)
+}
+
+fn redact_log_secrets(input: &str) -> String {
+    let re = Regex::new(
+        r"(?i)\b(token|secret|password|authorization|api[_-]?key)(\s*[:=]\s*)([^\s,;]+)",
+    )
+    .expect("valid secret redaction regex");
+    re.replace_all(input, "$1$2[REDACTED]").into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn log_name_allows_only_known_services() {
+        assert_eq!(log_name("gateway"), Some("gateway"));
+        assert_eq!(log_name("text-worker"), Some("text"));
+        assert_eq!(log_name("ltx-worker"), Some("ltx"));
+        assert_eq!(log_name("../gateway"), None);
+        assert_eq!(log_name("gateway/../../secret"), None);
+    }
+
+    #[test]
+    fn log_redaction_masks_common_secret_shapes() {
+        let redacted = redact_log_secrets(
+            "token=abc123 password: hunter2 api_key=key123 authorization: Bearer xyz",
+        );
+        assert!(redacted.contains("token=[REDACTED]"));
+        assert!(redacted.contains("password: [REDACTED]"));
+        assert!(redacted.contains("api_key=[REDACTED]"));
+        assert!(redacted.contains("authorization: [REDACTED]"));
+        assert!(!redacted.contains("hunter2"));
+        assert!(!redacted.contains("key123"));
+    }
 }

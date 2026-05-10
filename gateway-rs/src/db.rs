@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use libsql::{params, Builder, Connection};
+use serde_json::Value;
 use uuid::Uuid;
 
 use crate::{
@@ -39,29 +40,87 @@ impl Db {
         self.conn
             .execute_batch(include_str!("../migrations/001_init.sql"))
             .await?;
-        self.ensure_user_role_column().await?;
-        self.ensure_bootstrap_admin().await?;
+        self.record_migration_if_missing("001_init").await?;
+        if !self.migration_applied("002_user_roles").await? {
+            self.ensure_user_role_column().await?;
+            self.ensure_bootstrap_admin().await?;
+            self.record_migration("002_user_roles").await?;
+        }
+        if !self.migration_applied("003_video_metadata").await? {
+            self.add_column_if_missing("video_jobs", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+                .await?;
+            self.record_migration("003_video_metadata").await?;
+        }
         Ok(())
     }
 
     async fn ensure_user_role_column(&self) -> anyhow::Result<()> {
-        let mut rows = self.conn.query("PRAGMA table_info(users)", ()).await?;
-        let mut has_role = false;
-        while let Some(row) = rows.next().await? {
-            let name: String = row.get(1)?;
-            if name == "role" {
-                has_role = true;
-                break;
-            }
+        self.add_column_if_missing("users", "role", "TEXT NOT NULL DEFAULT 'user'")
+            .await
+    }
+
+    async fn add_column_if_missing(
+        &self,
+        table: &str,
+        column: &str,
+        definition: &str,
+    ) -> anyhow::Result<()> {
+        if !is_identifier(table) || !is_identifier(column) {
+            anyhow::bail!("invalid migration identifier")
         }
-        if !has_role {
+        if !self.column_exists(table, column).await? {
             self.conn
                 .execute(
-                    "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
+                    &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
                     (),
                 )
                 .await?;
         }
+        Ok(())
+    }
+
+    async fn column_exists(&self, table: &str, column: &str) -> anyhow::Result<bool> {
+        let mut rows = self
+            .conn
+            .query(&format!("PRAGMA table_info({table})"), ())
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn migration_applied(&self, version: &str) -> anyhow::Result<bool> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT 1 FROM schema_migrations WHERE version = ?",
+                params![version],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
+    async fn record_migration_if_missing(&self, version: &str) -> anyhow::Result<()> {
+        self.conn
+            .execute(
+                "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                params![version, now_ts()],
+            )
+            .await?;
+        Ok(())
+    }
+
+    async fn record_migration(&self, version: &str) -> anyhow::Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO schema_migrations (version, applied_at) VALUES (?, ?)",
+                params![version, now_ts()],
+            )
+            .await?;
         Ok(())
     }
 
@@ -177,6 +236,37 @@ impl Db {
         }
     }
 
+    pub async fn list_users(&self) -> anyhow::Result<Vec<Value>> {
+        let mut rows = self
+            .conn
+            .query(
+                "SELECT id, email, role, created_at FROM users ORDER BY created_at DESC LIMIT 500",
+                (),
+            )
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows.next().await? {
+            out.push(serde_json::json!({
+                "user_id": row.get::<String>(0)?,
+                "email": row.get::<String>(1)?,
+                "role": row.get::<String>(2)?,
+                "created_at": row.get::<i64>(3)?,
+            }));
+        }
+        Ok(out)
+    }
+
+    pub async fn update_user_role(&self, user_id: &str, role: &str) -> anyhow::Result<bool> {
+        let changed = self
+            .conn
+            .execute(
+                "UPDATE users SET role = ? WHERE id = ?",
+                params![role, user_id],
+            )
+            .await?;
+        Ok(changed > 0)
+    }
+
     pub async fn create_session(
         &self,
         token_hash: &str,
@@ -222,6 +312,29 @@ impl Db {
         } else {
             Ok(None)
         }
+    }
+
+    pub async fn create_audit_event(
+        &self,
+        user_id: Option<&str>,
+        event_type: &str,
+        target: &str,
+        metadata: &Value,
+    ) -> anyhow::Result<()> {
+        self.conn
+            .execute(
+                "INSERT INTO audit_events (id, user_id, event_type, target, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                params![
+                    Uuid::now_v7().to_string(),
+                    user_id,
+                    event_type,
+                    target,
+                    serde_json::to_string(metadata)?,
+                    now_ts()
+                ],
+            )
+            .await?;
+        Ok(())
     }
 
     pub async fn create_chat_session_if_missing(
@@ -383,6 +496,7 @@ impl Db {
 
     pub async fn create_rag_document(
         &self,
+        document_id: &str,
         user_id: &str,
         collection_name: &str,
         source_name: &str,
@@ -400,14 +514,13 @@ impl Db {
             anyhow::bail!("rag collection not found")
         };
         let collection_id: String = row.get(0)?;
-        let id = Uuid::now_v7().to_string();
         self.conn
             .execute(
                 "INSERT INTO rag_documents (id, collection_id, user_id, source_name, metadata_json, chunk_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                params![id.clone(), collection_id, user_id, source_name, metadata_json, chunk_count, now_ts()],
+                params![document_id, collection_id, user_id, source_name, metadata_json, chunk_count, now_ts()],
             )
             .await?;
-        Ok(id)
+        Ok(document_id.to_owned())
     }
 
     pub async fn rag_document_collection(
@@ -452,9 +565,16 @@ impl Db {
         r2_key: &str,
     ) -> anyhow::Result<()> {
         let now = now_ts();
+        let metadata = serde_json::json!({
+            "upscaled": false,
+            "render_width": req.width,
+            "render_height": req.height,
+            "output_width": req.width,
+            "output_height": req.height,
+        });
         self.conn
             .execute(
-                "INSERT INTO video_jobs (id, user_id, mode, status, prompt, params_json, effective_seed, r2_key, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO video_jobs (id, user_id, mode, status, prompt, params_json, effective_seed, r2_key, metadata_json, created_at, updated_at) VALUES (?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)",
                 params![
                     job_id.to_string(),
                     user_id,
@@ -463,6 +583,7 @@ impl Db {
                     serde_json::to_string(req)?,
                     effective_seed,
                     r2_key,
+                    serde_json::to_string(&metadata)?,
                     now,
                     now
                 ],
@@ -475,7 +596,7 @@ impl Db {
         let mut rows = self
             .conn
             .query(
-                "SELECT COUNT(*) FROM video_jobs WHERE status IN ('queued','running')",
+                "SELECT COUNT(*) FROM video_jobs WHERE status IN ('queued','running','materializing_inputs','generating','encoding','upscaling','uploading')",
                 (),
             )
             .await?;
@@ -493,6 +614,7 @@ impl Db {
         progress: f32,
         result_url: Option<&str>,
         error: Option<&str>,
+        metadata: Option<&Value>,
     ) -> anyhow::Result<()> {
         let now = now_ts();
         let completed = if matches!(status, "complete" | "failed" | "cancelled") {
@@ -500,21 +622,27 @@ impl Db {
         } else {
             None
         };
+        let metadata_json = metadata.map(serde_json::to_string).transpose()?;
         self.conn
             .execute(
-                "UPDATE video_jobs SET status = ?, progress = ?, result_url = COALESCE(?, result_url), error = ?, updated_at = ?, completed_at = COALESCE(?, completed_at) WHERE id = ?",
-                params![status, progress, result_url, error, now, completed, job_id],
+                "UPDATE video_jobs SET status = ?, progress = ?, result_url = COALESCE(?, result_url), error = ?, metadata_json = COALESCE(?, metadata_json), updated_at = ?, completed_at = COALESCE(?, completed_at) WHERE id = ?",
+                params![status, progress, result_url, error, metadata_json, now, completed, job_id],
             )
             .await?;
         Ok(())
     }
 
-    pub async fn mark_video_started(&self, job_id: &str) -> anyhow::Result<()> {
+    pub async fn mark_video_stage(
+        &self,
+        job_id: &str,
+        status: &str,
+        progress: f32,
+    ) -> anyhow::Result<()> {
         let now = now_ts();
         self.conn
             .execute(
-                "UPDATE video_jobs SET status = 'running', started_at = COALESCE(started_at, ?), updated_at = ? WHERE id = ? AND cancel_requested = 0",
-                params![now, now, job_id],
+                "UPDATE video_jobs SET status = ?, progress = ?, started_at = COALESCE(started_at, ?), updated_at = ? WHERE id = ? AND cancel_requested = 0",
+                params![status, progress, now, now, job_id],
             )
             .await?;
         Ok(())
@@ -538,7 +666,7 @@ impl Db {
         let mut rows = self
             .conn
             .query(
-                "SELECT id, status, progress, result_url, error, created_at, updated_at FROM video_jobs WHERE id = ? AND user_id = ?",
+                "SELECT id, status, progress, result_url, error, created_at, updated_at, effective_seed, r2_key, metadata_json FROM video_jobs WHERE id = ? AND user_id = ?",
                 params![job_id, user_id],
             )
             .await?;
@@ -551,6 +679,9 @@ impl Db {
                 error: row.get(4)?,
                 created_at: row.get(5)?,
                 updated_at: row.get(6)?,
+                effective_seed: row.get(7)?,
+                r2_key: row.get(8)?,
+                metadata: parse_json_value(row.get::<String>(9)?)?,
             })
         } else {
             None
@@ -566,7 +697,7 @@ impl Db {
         let mut rows = self
             .conn
             .query(
-                "SELECT id, mode, status, prompt, progress, result_url, error, created_at, updated_at FROM video_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                "SELECT id, mode, status, prompt, progress, result_url, error, created_at, updated_at, effective_seed, r2_key, metadata_json FROM video_jobs WHERE user_id = ? ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 params![user_id, limit, offset],
             )
             .await?;
@@ -582,6 +713,9 @@ impl Db {
                 "error": row.get::<Option<String>>(6)?,
                 "created_at": row.get::<i64>(7)?,
                 "updated_at": row.get::<i64>(8)?,
+                "effective_seed": row.get::<i64>(9)?,
+                "r2_key": row.get::<String>(10)?,
+                "metadata": parse_json_value(row.get::<String>(11)?)?,
             }));
         }
         Ok(out)
@@ -590,7 +724,7 @@ impl Db {
     pub async fn recover_interrupted_video_jobs(&self) -> anyhow::Result<()> {
         self.conn
             .execute(
-                "UPDATE video_jobs SET status = 'queued', progress = 0.0, updated_at = ? WHERE status = 'running'",
+                "UPDATE video_jobs SET status = 'queued', progress = 0.0, updated_at = ? WHERE status IN ('running','materializing_inputs','generating','encoding','upscaling','uploading')",
                 params![now_ts()],
             )
             .await?;
@@ -634,4 +768,161 @@ fn chat_message_json(row: &libsql::Row) -> anyhow::Result<serde_json::Value> {
         "model_id": row.get::<Option<String>>(4)?,
         "created_at": row.get::<i64>(5)?,
     }))
+}
+
+fn is_identifier(value: &str) -> bool {
+    value
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn parse_json_value(raw: String) -> anyhow::Result<Value> {
+    Ok(serde_json::from_str(&raw).unwrap_or_else(|_| serde_json::json!({})))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{net::SocketAddr, path::PathBuf, time::Duration};
+
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::models::VideoMode;
+
+    fn config_for(path: &std::path::Path) -> Config {
+        Config {
+            bind_addr: "127.0.0.1:0".parse::<SocketAddr>().unwrap(),
+            profile: "cloud_h200".into(),
+            runtime_backend: "native".into(),
+            compose_project: "test".into(),
+            turso_db_url: format!("file:{}", path.display()),
+            turso_auth_token: String::new(),
+            admin_api_key: "admin-key".into(),
+            admin_emails: vec![],
+            cors_permissive: true,
+            cors_allowed_origins: vec![],
+            service_api_key: "service-key".into(),
+            session_ttl: Duration::from_secs(3600),
+            text_worker_url: "http://127.0.0.1:8101".into(),
+            ltx_worker_url: "http://127.0.0.1:8102".into(),
+            text_model_registry: vec!["test-model".into()],
+            text_max_waiting: 8,
+            ltx_max_waiting: 8,
+            local_max_heavy_jobs: 1,
+            text_heavy_jobs: 1,
+            video_heavy_jobs: 1,
+            qdrant_url: "http://127.0.0.1:6333".into(),
+            r2_public_base_url: String::new(),
+            storage_dir: PathBuf::from("storage"),
+            frontend_dir: PathBuf::from("frontend/dist"),
+            log_dir: PathBuf::from("runtime/logs"),
+            native_text_command: String::new(),
+            native_ltx_command: String::new(),
+        }
+    }
+
+    async fn migrated_db() -> anyhow::Result<(tempfile::TempDir, Db)> {
+        let dir = tempdir()?;
+        let config = config_for(&dir.path().join("gateway.db"));
+        let db = Db::connect(&config).await?;
+        db.migrate().await?;
+        Ok((dir, db))
+    }
+
+    #[tokio::test]
+    async fn migration_table_is_idempotent() -> anyhow::Result<()> {
+        let (_dir, db) = migrated_db().await?;
+        db.migrate().await?;
+        assert!(db.column_exists("users", "role").await?);
+        assert!(db.column_exists("video_jobs", "metadata_json").await?);
+        assert!(db.migration_applied("001_init").await?);
+        assert!(db.migration_applied("002_user_roles").await?);
+        assert!(db.migration_applied("003_video_metadata").await?);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn bootstrap_admin_promotes_first_existing_user() -> anyhow::Result<()> {
+        let (_dir, db) = migrated_db().await?;
+        let user = db.create_user("user@example.com", "hash", "user").await?;
+        db.conn
+            .execute(
+                "DELETE FROM schema_migrations WHERE version = '002_user_roles'",
+                (),
+            )
+            .await?;
+        db.migrate().await?;
+        let promoted = db.user_by_id(&user.id).await?.expect("user exists");
+        assert_eq!(promoted.role, "admin");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_role_update_and_list_are_consistent() -> anyhow::Result<()> {
+        let (_dir, db) = migrated_db().await?;
+        let user = db.create_user("person@example.com", "hash", "user").await?;
+        assert!(db.update_user_role(&user.id, "admin").await?);
+        assert!(!db.update_user_role("missing", "admin").await?);
+        let listed = db.list_users().await?;
+        assert!(listed
+            .iter()
+            .any(|item| { item["user_id"] == user.id && item["role"] == "admin" }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn video_job_persists_seed_r2_key_and_metadata() -> anyhow::Result<()> {
+        let (_dir, db) = migrated_db().await?;
+        let user = db.create_user("video@example.com", "hash", "user").await?;
+        let job_id = Uuid::now_v7();
+        let req = VideoJobRequest {
+            mode: VideoMode::TextToVideo,
+            prompt: "test prompt".into(),
+            negative_prompt: None,
+            width: 3840,
+            height: 2160,
+            num_frames: 121,
+            frame_rate: Some(24.0),
+            guidance_scale: Some(7.5),
+            num_inference_steps: Some(40),
+            seed_hint: None,
+            image_url: None,
+            video_url: None,
+            audio_url: None,
+            keyframe_urls: None,
+            retake_start_time: None,
+            retake_end_time: None,
+            enhance_prompt: None,
+            extra: None,
+        };
+        db.create_video_job(&user.id, &job_id, &req, 42, "users/u/videos/j/output.mp4")
+            .await?;
+        db.mark_video_stage(&job_id.to_string(), "generating", 0.25)
+            .await?;
+        let metadata = serde_json::json!({
+            "upscaled": true,
+            "render_width": 1024,
+            "render_height": 576,
+            "output_width": 3840,
+            "output_height": 2160
+        });
+        db.update_video_job(
+            &job_id.to_string(),
+            "complete",
+            1.0,
+            Some("https://cdn.example/video.mp4"),
+            None,
+            Some(&metadata),
+        )
+        .await?;
+        let status = db
+            .video_job(&user.id, &job_id.to_string())
+            .await?
+            .expect("job exists");
+        assert_eq!(status.effective_seed, 42);
+        assert_eq!(status.r2_key, "users/u/videos/j/output.mp4");
+        assert_eq!(status.metadata["upscaled"], true);
+        assert_eq!(status.metadata["render_width"], 1024);
+        Ok(())
+    }
 }

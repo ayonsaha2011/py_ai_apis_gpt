@@ -1,0 +1,20 @@
+[Unit]
+Description=py_ai_apis_gpt LTX worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/workspace/py_ai_apis_gpt/services/ltx-worker
+EnvironmentFile=/workspace/py_ai_apis_gpt/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+ExecStart=/workspace/py_ai_apis_gpt/.venv-h100/bin/uvicorn app.main:app --host 127.0.0.1 --port 8102
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+StandardOutput=append:/workspace/py_ai_apis_gpt/runtime/logs/ltx.log
+StandardError=append:/workspace/py_ai_apis_gpt/runtime/logs/ltx.log
+
+[Install]
+WantedBy=multi-user.target
