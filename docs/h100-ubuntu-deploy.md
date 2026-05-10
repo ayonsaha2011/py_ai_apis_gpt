@@ -89,13 +89,13 @@ For production Turso, both `TURSO_DB_URL=libsql://...` and `TURSO_AUTH_TOKEN=...
 ## Service Control
 
 ```bash
-scripts/deploy_h100.sh check
-scripts/deploy_h100.sh deploy --hf-token hf_your_read_token
-scripts/deploy_h100.sh start all
-scripts/deploy_h100.sh restart all
-scripts/deploy_h100.sh status all
-scripts/deploy_h100.sh logs ltx -f
-scripts/deploy_h100.sh stop all
+bash scripts/deploy_h100.sh check
+bash scripts/deploy_h100.sh deploy --hf-token hf_your_read_token
+bash scripts/deploy_h100.sh start all
+bash scripts/deploy_h100.sh restart all
+bash scripts/deploy_h100.sh status all
+bash scripts/deploy_h100.sh logs ltx -f
+bash scripts/deploy_h100.sh stop all
 ```
 
 Logs and PID files are stored under `runtime/h100/`.

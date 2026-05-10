@@ -51,12 +51,44 @@ impl Db {
                 .await?;
             self.record_migration("003_video_metadata").await?;
         }
+        if !self
+            .migration_applied("004_video_job_runtime_columns")
+            .await?
+        {
+            self.ensure_video_job_runtime_columns().await?;
+            self.record_migration("004_video_job_runtime_columns")
+                .await?;
+        }
         Ok(())
     }
 
     async fn ensure_user_role_column(&self) -> anyhow::Result<()> {
         self.add_column_if_missing("users", "role", "TEXT NOT NULL DEFAULT 'user'")
             .await
+    }
+
+    async fn ensure_video_job_runtime_columns(&self) -> anyhow::Result<()> {
+        self.add_column_if_missing("video_jobs", "result_url", "TEXT")
+            .await?;
+        self.add_column_if_missing("video_jobs", "error", "TEXT")
+            .await?;
+        self.add_column_if_missing("video_jobs", "progress", "REAL NOT NULL DEFAULT 0.0")
+            .await?;
+        self.add_column_if_missing(
+            "video_jobs",
+            "cancel_requested",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.add_column_if_missing("video_jobs", "started_at", "INTEGER")
+            .await?;
+        self.add_column_if_missing("video_jobs", "updated_at", "INTEGER NOT NULL DEFAULT 0")
+            .await?;
+        self.add_column_if_missing("video_jobs", "completed_at", "INTEGER")
+            .await?;
+        self.add_column_if_missing("video_jobs", "metadata_json", "TEXT NOT NULL DEFAULT '{}'")
+            .await?;
+        Ok(())
     }
 
     async fn add_column_if_missing(
@@ -835,9 +867,60 @@ mod tests {
         db.migrate().await?;
         assert!(db.column_exists("users", "role").await?);
         assert!(db.column_exists("video_jobs", "metadata_json").await?);
+        assert!(db.column_exists("video_jobs", "progress").await?);
         assert!(db.migration_applied("001_init").await?);
         assert!(db.migration_applied("002_user_roles").await?);
         assert!(db.migration_applied("003_video_metadata").await?);
+        assert!(
+            db.migration_applied("004_video_job_runtime_columns")
+                .await?
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_repairs_legacy_video_jobs_without_progress() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let config = config_for(&dir.path().join("legacy.db"));
+        let db = Db::connect(&config).await?;
+        db.conn
+            .execute_batch(
+                "
+                CREATE TABLE users (
+                    id TEXT PRIMARY KEY,
+                    email TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE video_jobs (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    params_json TEXT NOT NULL,
+                    effective_seed INTEGER NOT NULL,
+                    r2_key TEXT NOT NULL UNIQUE,
+                    created_at INTEGER NOT NULL
+                );
+                ",
+            )
+            .await?;
+        db.migrate().await?;
+        for column in [
+            "result_url",
+            "error",
+            "progress",
+            "cancel_requested",
+            "started_at",
+            "updated_at",
+            "completed_at",
+            "metadata_json",
+        ] {
+            assert!(db.column_exists("video_jobs", column).await?, "{column}");
+        }
+        db.recover_interrupted_video_jobs().await?;
         Ok(())
     }
 
