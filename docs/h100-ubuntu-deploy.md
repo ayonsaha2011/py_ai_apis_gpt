@@ -27,6 +27,13 @@ Useful flags:
 - `--skip-python-deps`: skip Python dependency installation.
 - `--skip-models`: skip Hugging Face model downloads.
 - `--install-pytorch`: install CUDA 12.8 PyTorch into the deployment venv instead of relying only on preinstalled torch.
+- `--hf-token hf_...`: pass a Hugging Face token for gated model downloads without editing `.env.h100`.
+
+Example with a gated-model token:
+
+```bash
+bash scripts/deploy_h100.sh deploy --hf-token hf_your_read_token
+```
 
 ## Environment
 
@@ -47,11 +54,28 @@ AI_PYTHON_BIN=python3.12
 
 Set real values for `ADMIN_API_KEY`, `SERVICE_API_KEY`, Turso, and R2 before exposing the service.
 
-Gemma is a gated Hugging Face model. Before running model download, use a token from an account that has accepted the model terms:
+Gemma is a gated Hugging Face model. The deploy script installs and checks `huggingface-cli`/`hf` inside `.venv-h100`. Before model download, authenticate with one of these methods.
+
+Option 1: pass the token directly to deploy:
+
+```bash
+bash scripts/deploy_h100.sh deploy --hf-token hf_your_read_token
+```
+
+Option 2: put a token in `.env.h100`:
 
 ```bash
 HF_TOKEN=hf_your_read_token
 ```
+
+Option 3: login from the deployment venv:
+
+```bash
+/workspace/py_ai_apis_gpt/.venv-h100/bin/huggingface-cli login
+bash scripts/deploy_h100.sh deploy
+```
+
+The token account must have accepted access for `google/gemma-3-12b-it-qat-q4_0-unquantized`. If `HF_TOKEN` in `.env.h100` is still a placeholder, either replace it or remove that line before using CLI login.
 
 For a local smoke run without Turso, set:
 
@@ -66,6 +90,7 @@ For production Turso, both `TURSO_DB_URL=libsql://...` and `TURSO_AUTH_TOKEN=...
 
 ```bash
 scripts/deploy_h100.sh check
+scripts/deploy_h100.sh deploy --hf-token hf_your_read_token
 scripts/deploy_h100.sh start all
 scripts/deploy_h100.sh restart all
 scripts/deploy_h100.sh status all

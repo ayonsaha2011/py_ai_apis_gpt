@@ -2,7 +2,7 @@
 # H100 Ubuntu 24.04 deployment and operations script.
 # Target image: preinstalled CUDA PyTorch, for example torch 2.8.0+cu128 on CUDA 12.8.
 # Usage:
-#   bash scripts/deploy_h100.sh deploy [--skip-models] [--skip-apt] [--skip-python-deps] [--install-pytorch]
+#   bash scripts/deploy_h100.sh deploy [--skip-models] [--skip-apt] [--skip-python-deps] [--install-pytorch] [--hf-token TOKEN]
 #   bash scripts/deploy_h100.sh check
 #   bash scripts/deploy_h100.sh start|stop|restart|status|logs [all|gateway|text|ltx|qdrant]
 
@@ -31,8 +31,8 @@ fail() { echo -e "${RED}[error]${NC} $*" >&2; exit 1; }
 usage() {
   cat <<'USAGE'
 Usage:
-  scripts/deploy_h100.sh deploy [--skip-models] [--skip-apt] [--skip-python-deps] [--install-pytorch]
-  scripts/deploy_h100.sh setup  [--skip-models] [--skip-apt] [--skip-python-deps] [--install-pytorch]
+  scripts/deploy_h100.sh deploy [--skip-models] [--skip-apt] [--skip-python-deps] [--install-pytorch] [--hf-token TOKEN]
+  scripts/deploy_h100.sh setup  [--skip-models] [--skip-apt] [--skip-python-deps] [--install-pytorch] [--hf-token TOKEN]
   scripts/deploy_h100.sh check
   scripts/deploy_h100.sh start   [all|gateway|text|ltx|qdrant]
   scripts/deploy_h100.sh stop    [all|gateway|text|ltx|qdrant]
@@ -50,6 +50,7 @@ Environment:
   AI_PYTHON_BIN     Defaults to python3.12
   QDRANT_BIN        Defaults to /opt/qdrant/qdrant
   QDRANT_VERSION    Defaults to 1.11.0
+  HF_TOKEN          Hugging Face token for gated Gemma/LTX downloads. Can also be passed with --hf-token.
 USAGE
 }
 
@@ -235,9 +236,52 @@ install_pytorch_if_requested() {
 install_python_deps() {
   info "Installing Python dependencies without replacing system CUDA PyTorch..."
   "$VENV_DIR/bin/python" -m pip install -r "$ROOT_DIR/infra/requirements-h100-system.txt"
+  ensure_huggingface_cli
+}
+
+hf_cli_path() {
+  if [[ -x "$VENV_DIR/bin/huggingface-cli" ]]; then
+    printf '%s\n' "$VENV_DIR/bin/huggingface-cli"
+    return 0
+  fi
+  if [[ -x "$VENV_DIR/bin/hf" ]]; then
+    printf '%s\n' "$VENV_DIR/bin/hf"
+    return 0
+  fi
+  if command -v huggingface-cli >/dev/null 2>&1; then
+    command -v huggingface-cli
+    return 0
+  fi
+  if command -v hf >/dev/null 2>&1; then
+    command -v hf
+    return 0
+  fi
+  return 1
+}
+
+ensure_huggingface_cli() {
+  local cli
+  if cli="$(hf_cli_path)"; then
+    info "Hugging Face CLI available: $cli"
+    "$cli" --help >/dev/null 2>&1 || fail "Hugging Face CLI exists at $cli but failed to run"
+    return
+  fi
+  info "Installing Hugging Face CLI into $VENV_DIR..."
+  "$VENV_DIR/bin/python" -m pip install "huggingface_hub[cli]>=0.30"
+  cli="$(hf_cli_path)" || fail "huggingface-cli/hf was not found after installing huggingface_hub[cli]"
+  "$cli" --help >/dev/null 2>&1 || fail "Hugging Face CLI installed at $cli but failed to run"
+  info "Hugging Face CLI ready: $cli"
+}
+
+check_huggingface_cli() {
+  local cli
+  cli="$(hf_cli_path)" || fail "Missing Hugging Face CLI. Run deploy/setup, or install it with: $VENV_DIR/bin/python -m pip install 'huggingface_hub[cli]>=0.30'"
+  "$cli" --help >/dev/null 2>&1 || fail "Hugging Face CLI exists at $cli but failed to run"
+  info "Hugging Face CLI OK: $cli"
 }
 
 download_models() {
+  ensure_huggingface_cli
   require_huggingface_access
   info "Downloading LTX-2.3 and Gemma model assets..."
   local hf_args=()
@@ -281,6 +325,7 @@ require_secret() {
 }
 
 require_huggingface_access() {
+  check_huggingface_cli
   local token="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-}}"
   if [[ -n "$token" && "$token" == replace-* ]]; then
     fail "HF_TOKEN is still a placeholder in $ENV_FILE. Set HF_TOKEN to a Hugging Face read token with access to google/gemma-3-12b-it-qat-q4_0-unquantized, or remove it and run huggingface-cli login."
@@ -361,6 +406,7 @@ PY
 check_imports() {
   "$VENV_DIR/bin/python" - <<'PY'
 import fastapi
+import huggingface_hub
 import qdrant_client
 import transformers
 import uvicorn
@@ -371,6 +417,7 @@ major = int(transformers.__version__.split(".", 1)[0])
 if major >= 5:
     raise SystemExit(f"transformers<5 required by LTX Gemma adapter, got {transformers.__version__}")
 print(f"transformers={transformers.__version__}")
+print(f"huggingface_hub={huggingface_hub.__version__}")
 print("python imports OK")
 PY
 }
@@ -404,6 +451,7 @@ full_check() {
   check_gpu
   check_torch
   check_imports
+  check_huggingface_cli
   check_models
   [[ -x "$QDRANT_BIN" ]] || fail "Missing Qdrant binary at $QDRANT_BIN"
   [[ -x "$ROOT_DIR/gateway-rs/target/release/gateway-rs" ]] || fail "Missing gateway release binary; run deploy/setup"
@@ -415,6 +463,7 @@ setup_all() {
   local skip_apt="0"
   local skip_python_deps="0"
   local install_pytorch="0"
+  local cli_hf_token=""
 
   shift || true
   while [[ $# -gt 0 ]]; do
@@ -423,6 +472,11 @@ setup_all() {
       --skip-apt) skip_apt="1" ;;
       --skip-python-deps) skip_python_deps="1" ;;
       --install-pytorch) install_pytorch="1" ;;
+      --hf-token)
+        shift
+        [[ -n "${1:-}" ]] || fail "--hf-token requires a token value"
+        cli_hf_token="$1"
+        ;;
       -h|--help) usage; exit 0 ;;
       *) fail "Unknown setup option: $1" ;;
     esac
@@ -432,6 +486,9 @@ setup_all() {
   cd "$ROOT_DIR"
   ensure_dirs
   load_env_if_present
+  if [[ -n "$cli_hf_token" ]]; then
+    export HF_TOKEN="$cli_hf_token"
+  fi
   if [[ "$skip_apt" != "1" ]]; then
     install_apt_packages
   fi
@@ -446,6 +503,9 @@ setup_all() {
     install_python_deps
   fi
   load_env_if_present
+  if [[ -n "$cli_hf_token" ]]; then
+    export HF_TOKEN="$cli_hf_token"
+  fi
   if [[ "$skip_models" != "1" ]]; then
     download_models
   else

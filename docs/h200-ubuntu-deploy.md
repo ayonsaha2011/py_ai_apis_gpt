@@ -6,6 +6,12 @@ Use `scripts/deploy_h200.sh` for H200 servers. It wraps the shared deployment sc
 bash scripts/deploy_h200.sh deploy
 ```
 
+For gated Hugging Face model access without editing `.env.h200`:
+
+```bash
+bash scripts/deploy_h200.sh deploy --hf-token hf_your_read_token
+```
+
 The H200 defaults are:
 
 - `AI_ENV_FILE=.env.h200`
@@ -15,11 +21,28 @@ The H200 defaults are:
 
 The H200 wrapper calls the shared H100/H200 deployment implementation through `bash`, so it does not require executable bits on `scripts/deploy_h100.sh`.
 
-Gemma downloads require gated Hugging Face access. Put a real read token in `.env.h200`:
+Gemma downloads require gated Hugging Face access. The deploy script installs and checks `huggingface-cli`/`hf` inside `.venv-h200`. Authenticate with one of these methods.
+
+Option 1: pass the token directly:
+
+```bash
+bash scripts/deploy_h200.sh deploy --hf-token hf_your_read_token
+```
+
+Option 2: put a real read token in `.env.h200`:
 
 ```bash
 HF_TOKEN=hf_your_read_token
 ```
+
+Option 3: login from the deployment venv:
+
+```bash
+/workspace/py_ai_apis_gpt/.venv-h200/bin/huggingface-cli login
+bash scripts/deploy_h200.sh deploy
+```
+
+The token account must have accepted access for `google/gemma-3-12b-it-qat-q4_0-unquantized`. If `HF_TOKEN` in `.env.h200` is still a placeholder, either replace it or remove that line before using CLI login.
 
 For a local smoke run, use `TURSO_DB_URL=file:storage/gateway.db`. For production Turso, set both `TURSO_DB_URL=libsql://...` and `TURSO_AUTH_TOKEN=...`; placeholders are rejected before services start.
 
