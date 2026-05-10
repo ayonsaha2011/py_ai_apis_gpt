@@ -124,7 +124,7 @@ For the full 22B BF16 H100 profile, use the safer SD budget:
 }
 ```
 
-For HD on H100, use `mode=distilled` with `1024x576` and `121` frames. For 10-second HD clips, use the H200 profile.
+This deployment keeps one full dev LTX pipeline on GPU. Distilled and specialized modes are disabled; use `text_to_video` or `image_to_video`.
 
 4K support on H100 is output-only upscaling. The request can use `3840x2160` for 5 seconds, but the worker records a safe native render size in job metadata:
 
@@ -153,4 +153,4 @@ The units expect the repo at `/workspace/py_ai_apis_gpt`; edit `WorkingDirectory
 - Video outputs are never response-cached. Each request receives a unique job ID, R2 key, and effective seed.
 - Supported H100 outcomes:
   - Full 22B BF16: native SD 5 seconds, 4K output via upscale 5 seconds.
-  - Distilled/specialized: native HD 5 seconds, 4K output via upscale 5 seconds.
+  - Distilled/specialized: disabled to avoid loading a second model.

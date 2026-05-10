@@ -38,12 +38,6 @@ const defaultModel = "google/gemma-3-12b-it-qat-q4_0-unquantized";
 const videoModes = [
   "text_to_video",
   "image_to_video",
-  "video_to_video",
-  "audio_to_video",
-  "keyframe_interpolation",
-  "retake",
-  "distilled",
-  "hdr",
 ] as const;
 
 type VideoMode = (typeof videoModes)[number];
@@ -51,12 +45,6 @@ type VideoMode = (typeof videoModes)[number];
 const modeLabels: Record<VideoMode, string> = {
   text_to_video: "Text to video",
   image_to_video: "Image to video",
-  video_to_video: "Video to video",
-  audio_to_video: "Audio to video",
-  keyframe_interpolation: "Keyframes",
-  retake: "Retake",
-  distilled: "Fast distilled",
-  hdr: "HDR",
 };
 
 const resolutionPresets = [
@@ -137,13 +125,13 @@ const videoExamples: VideoExample[] = [
   },
   {
     title: "City motion",
-    mode: "distilled",
-    width: "1024",
-    height: "576",
-    duration: "10",
-    frames: "241",
-    steps: "30",
-    cfg: "6.5",
+    mode: "text_to_video",
+    width: "768",
+    height: "448",
+    duration: "5",
+    frames: "121",
+    steps: "36",
+    cfg: "7.0",
     prompt:
       "A late-night aerial shot flying between rain-slick skyscrapers in Tokyo, neon signs reflected on glass, traffic trails below, smooth forward motion, realistic atmosphere, cinematic contrast.",
     negative: "overexposed neon, unstable camera, smeared buildings, low detail, text artifacts",
@@ -188,7 +176,6 @@ function videoBudgetWarning(form: VideoForm, profile: string): string {
   const height = Number(form.height);
   const frames = Number(form.frames);
   if (!Number.isFinite(width) || !Number.isFinite(height) || !Number.isFinite(frames)) return "";
-  const distilledLike = form.mode === "distilled" || form.mode === "video_to_video" || form.mode === "hdr";
   const lowered = profile.toLowerCase();
   const h200 = lowered.includes("h200");
   const h100 = lowered.includes("h100");
@@ -200,38 +187,19 @@ function videoBudgetWarning(form: VideoForm, profile: string): string {
   let maxOutputPixels = 1024 * 1024;
   let label = "local full 22B";
   let guidance = "Use 5 seconds at 768x448, or select a cloud profile for larger jobs.";
-  if (h200 && distilledLike) {
-    maxNativeFrames = 241;
-    maxUpscaledFrames = 121;
-    maxPixelFrames = 1024 * 576 * 241;
-    maxNativeSide = 1536;
-    maxOutputSide = 4096;
-    maxOutputPixels = 4096 * 2160;
-    label = "H200 distilled/specialized";
-    guidance = "Use 10 seconds at HD, or 5 seconds for 4K upscaled output.";
-  } else if (h200) {
+  if (h200) {
     maxPixelFrames = 1024 * 576 * 121;
     maxNativeSide = 1536;
     maxOutputSide = 4096;
     maxOutputPixels = 4096 * 2160;
     label = "H200 full 22B bf16";
-    guidance = "Use 5 seconds at HD or 4K upscaled output, or switch to Fast distilled for longer HD clips.";
-  } else if (h100 && distilledLike) {
-    maxPixelFrames = 1024 * 576 * 121;
-    maxOutputSide = 4096;
-    maxOutputPixels = 4096 * 2160;
-    label = "H100 distilled/specialized";
-    guidance = "Use 5 seconds at HD or 4K upscaled output, or switch to H200 for longer HD clips.";
+    guidance = "Use 5 seconds at HD or 4K upscaled output from the full dev model.";
   } else if (h100) {
     maxPixelFrames = 768 * 448 * 121;
     maxOutputSide = 4096;
     maxOutputPixels = 4096 * 2160;
     label = "H100 full 22B bf16";
-    guidance = "Use 5 seconds at SD or 4K upscaled output, or switch to Fast distilled/H200 for larger clips.";
-  } else if (distilledLike) {
-    maxPixelFrames = 1024 * 576 * 121;
-    label = "local distilled/specialized";
-    guidance = "Use 5 seconds at 1024x576, or reduce resolution for longer clips.";
+    guidance = "Use 5 seconds at SD or 4K upscaled output from the full dev model.";
   }
   if (width > maxOutputSide || height > maxOutputSide) return `${label} supports output up to ${maxOutputSide}px per side.`;
   if (width * height > maxOutputPixels) return `${label} supports up to 4K output pixels.`;
@@ -252,11 +220,10 @@ function isUpscaledOutput(form: VideoForm, profile: string): boolean {
   const lowered = profile.toLowerCase();
   const h200 = lowered.includes("h200");
   const h100 = lowered.includes("h100");
-  const distilledLike = form.mode === "distilled" || form.mode === "video_to_video" || form.mode === "hdr";
   let maxNativeSide = h200 ? 1536 : 1024;
-  let maxNativeFrames = h200 && distilledLike ? 241 : 121;
-  let maxPixelFrames = h200 || distilledLike ? 1024 * 576 * maxNativeFrames : 768 * 448 * 121;
-  if (h100 && !distilledLike) maxPixelFrames = 768 * 448 * 121;
+  let maxNativeFrames = 121;
+  let maxPixelFrames = h200 ? 1024 * 576 * maxNativeFrames : 768 * 448 * 121;
+  if (h100) maxPixelFrames = 768 * 448 * 121;
   if (!h100 && !h200) return false;
   return width > maxNativeSide || height > maxNativeSide || width * height * frames > maxPixelFrames;
 }
@@ -1101,11 +1068,11 @@ function VideoPage({
 
 function videoRequirements(mode: VideoMode) {
   return {
-    image: mode === "image_to_video" || mode === "audio_to_video",
-    video: mode === "video_to_video" || mode === "retake" || mode === "hdr",
-    audio: mode === "audio_to_video",
-    keyframes: mode === "keyframe_interpolation",
-    retake: mode === "retake",
+    image: mode === "image_to_video",
+    video: false,
+    audio: false,
+    keyframes: false,
+    retake: false,
   };
 }
 

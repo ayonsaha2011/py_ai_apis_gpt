@@ -9,10 +9,6 @@ from pathlib import Path
 
 LTX_ALLOW = [
     "ltx-2.3-22b-dev.safetensors",
-    "ltx-2.3-22b-distilled-1.1.safetensors",
-    "ltx-2.3-22b-distilled.safetensors",
-    "ltx-2.3-22b-distilled-lora-384-1.1.safetensors",
-    "ltx-2.3-22b-distilled-lora-384.safetensors",
     "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
     "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors",
     "ltx-2.3-temporal-upscaler-x2-1.0.safetensors",

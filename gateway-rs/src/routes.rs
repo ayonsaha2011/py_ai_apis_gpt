@@ -120,6 +120,7 @@ async fn status(State(state): State<AppState>) -> Result<Json<Value>> {
     Ok(Json(json!({
         "status": "ok",
         "profile": state.config.profile,
+        "ltx_full_dev_only": true,
         "queues": state.admission.stats(),
         "gpus": gpu::list_gpus().unwrap_or_default(),
     })))

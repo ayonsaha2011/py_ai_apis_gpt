@@ -80,7 +80,7 @@ async def run_job(body: InternalJobRequest, x_service_key: str | None = Header(d
                 status_code=507,
                 detail=(
                     "LTX generation exceeded available GPU memory. Reduce duration or resolution, "
-                    "or use the distilled mode for longer clips."
+                    "or use 768x448 at 5 seconds for the full dev model."
                 ),
             ) from exc
         raise

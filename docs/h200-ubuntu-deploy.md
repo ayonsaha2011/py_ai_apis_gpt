@@ -54,7 +54,7 @@ After `git pull`, restart the gateway to pick up Rust gateway changes. The H200 
 bash scripts/deploy_h200.sh restart gateway
 ```
 
-For full 22B BF16 H200 text-to-video, the gateway admits 5-second HD jobs at `1024x576` and `121` frames. Distilled and compatible specialized modes admit 10-second HD jobs at `1024x576` and `241` frames. Larger requests are rejected before GPU allocation.
+For full 22B BF16 H200 text-to-video, the gateway admits 5-second HD jobs at `1024x576` and `121` frames. The LTX worker keeps one full dev pipeline on GPU, so distilled and specialized modes are rejected before GPU allocation.
 
 4K is supported as output-only upscaling for 5-second jobs. The API response and history include `metadata.upscaled`, `render_width`, `render_height`, `output_width`, and `output_height` so operators can distinguish native render cost from final artifact size.
 
@@ -70,4 +70,4 @@ sudo systemctl enable --now py-ai-text-worker py-ai-ltx-worker py-ai-gateway
 Supported H200 outcomes:
 
 - Full 22B BF16: native HD 5 seconds, 4K output via upscale 5 seconds.
-- Distilled/specialized: native HD 10 seconds, 4K output via upscale 5 seconds.
+- Distilled/specialized: disabled to avoid loading a second model.

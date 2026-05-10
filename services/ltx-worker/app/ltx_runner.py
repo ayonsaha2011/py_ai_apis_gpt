@@ -44,13 +44,6 @@ def _quantization() -> dict[str, Any]:
     raise ValueError(f"unsupported quantization {settings.quantization}")
 
 
-def _distilled_lora() -> list[Any]:
-    from ltx_core.loader import LTXV_LORA_COMFY_RENAMING_MAP, LoraPathStrengthAndSDOps
-
-    path = _pick("ltx-2.3-22b-distilled-lora-384-1.1.safetensors", "ltx-2.3-22b-distilled-lora-384.safetensors")
-    return [LoraPathStrengthAndSDOps(path, 1.0, LTXV_LORA_COMFY_RENAMING_MAP)]
-
-
 def _device() -> torch.device:
     ensure_runtime_ready()
     return torch.device(settings.cuda_device)
@@ -61,6 +54,7 @@ def runtime_status() -> dict[str, Any]:
         "cuda_requested": settings.cuda_device.startswith("cuda"),
         "cuda_available": torch.cuda.is_available(),
         "cuda_device": settings.cuda_device,
+        "full_dev_only": True,
         "torch_version": torch.__version__,
         "torch_cuda": torch.version.cuda,
         "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
@@ -74,7 +68,6 @@ def is_cuda_oom(exc: BaseException) -> bool:
 def release_cuda_memory(clear_pipelines: bool = False) -> None:
     if clear_pipelines:
         _two_stage_pipeline.cache_clear()
-        _distilled_pipeline.cache_clear()
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -93,6 +86,11 @@ def ensure_runtime_ready() -> None:
 
 
 def validate_ltx_budget(req: VideoRequest) -> None:
+    if req.mode not in {VideoMode.text_to_video, VideoMode.image_to_video}:
+        raise ValueError(
+            "this LTX worker allows only text_to_video and image_to_video; "
+            "distilled and specialized modes are disabled so the worker keeps one full dev model on GPU"
+        )
     if (req.num_frames - 1) % 8 != 0:
         raise ValueError("num_frames must satisfy 8k+1")
     if req.num_inference_steps is not None and not 1 <= req.num_inference_steps <= 40:
@@ -131,18 +129,6 @@ def _ltx_budget(req: VideoRequest) -> dict[str, Any]:
     profile = settings.gpu_profile.lower()
     h200 = "h200" in profile
     h100 = "h100" in profile
-    distilled_like = req.mode in {VideoMode.distilled, VideoMode.video_to_video, VideoMode.hdr}
-    if h200 and distilled_like:
-        return {
-            "max_native_side": 1536,
-            "max_frames": 241,
-            "max_pixel_frames": 1024 * 576 * 241,
-            "max_output_side": 4096,
-            "max_output_pixels": 4096 * 2160,
-            "max_upscaled_frames": 121,
-            "label": "H200 distilled LTX",
-            "guidance": "use up to 10 seconds at 1024x576, or reduce resolution for longer clips",
-        }
     if h200:
         return {
             "max_native_side": 1536,
@@ -152,18 +138,7 @@ def _ltx_budget(req: VideoRequest) -> dict[str, Any]:
             "max_output_pixels": 4096 * 2160,
             "max_upscaled_frames": 121,
             "label": "H200 full 22B bf16 LTX",
-            "guidance": "use 5 seconds at 1024x576 for full 22B bf16; use distilled or reduce resolution for longer clips",
-        }
-    if h100 and distilled_like:
-        return {
-            "max_native_side": 1024,
-            "max_frames": 121,
-            "max_pixel_frames": 1024 * 576 * 121,
-            "max_output_side": 4096,
-            "max_output_pixels": 4096 * 2160,
-            "max_upscaled_frames": 121,
-            "label": "H100 distilled LTX",
-            "guidance": "use 5 seconds at 1024x576, or switch to H200 for longer HD clips",
+            "guidance": "use 5 seconds at 1024x576 for full 22B bf16, or reduce resolution for longer clips",
         }
     if h100:
         return {
@@ -174,18 +149,7 @@ def _ltx_budget(req: VideoRequest) -> dict[str, Any]:
             "max_output_pixels": 4096 * 2160,
             "max_upscaled_frames": 121,
             "label": "H100 full 22B bf16 LTX",
-            "guidance": "use 5 seconds at 768x448 for full 22B bf16; use distilled or H200 for larger clips",
-        }
-    if distilled_like:
-        return {
-            "max_native_side": 1024,
-            "max_frames": 121,
-            "max_pixel_frames": 1024 * 576 * 121,
-            "max_output_side": 1024,
-            "max_output_pixels": 1024 * 1024,
-            "max_upscaled_frames": 121,
-            "label": "local distilled LTX",
-            "guidance": "use 5 seconds at 1024x576, or reduce resolution for longer clips",
+            "guidance": "use 5 seconds at 768x448 for full 22B bf16, or use H200 for larger clips",
         }
     return {
         "max_native_side": 1024,
@@ -216,23 +180,8 @@ def _two_stage_pipeline() -> Any:
     from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
 
     return TI2VidTwoStagesPipeline(
-        checkpoint_path=_pick("ltx-2.3-22b-dev.safetensors", "ltx-2.3-22b-distilled-1.1.safetensors"),
-        distilled_lora=_distilled_lora(),
-        spatial_upsampler_path=_pick("ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors"),
-        gemma_root=_gemma_root(),
-        loras=[],
-        device=_device(),
-        torch_compile=settings.torch_compile_ltx,
-        **_quantization(),
-    )
-
-
-@lru_cache(maxsize=1)
-def _distilled_pipeline() -> Any:
-    from ltx_pipelines.distilled import DistilledPipeline
-
-    return DistilledPipeline(
-        distilled_checkpoint_path=_pick("ltx-2.3-22b-distilled-1.1.safetensors", "ltx-2.3-22b-distilled.safetensors"),
+        checkpoint_path=_pick("ltx-2.3-22b-dev.safetensors"),
+        distilled_lora=[],
         spatial_upsampler_path=_pick("ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors"),
         gemma_root=_gemma_root(),
         loras=[],
@@ -256,19 +205,7 @@ def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> t
     generation_req, upscale_target = _generation_plan(req)
     encode_path = output_path.parent / "native_output.mp4" if upscale_target else output_path
 
-    if generation_req.mode == VideoMode.distilled:
-        video, audio = _distilled_pipeline()(
-            prompt=generation_req.prompt,
-            seed=seed,
-            height=generation_req.height,
-            width=generation_req.width,
-            num_frames=generation_req.num_frames,
-            frame_rate=generation_req.frame_rate or 24.0,
-            images=[],
-            tiling_config=TilingConfig.default(),
-            enhance_prompt=bool(generation_req.enhance_prompt),
-        )
-    elif generation_req.mode in {VideoMode.text_to_video, VideoMode.image_to_video}:
+    if generation_req.mode in {VideoMode.text_to_video, VideoMode.image_to_video}:
         images = _image_conditionings(generation_req)
         video, audio = _two_stage_pipeline()(
             prompt=generation_req.prompt,
@@ -380,66 +317,9 @@ def _image_conditionings(req: VideoRequest) -> list[Any]:
 
 
 def _run_specialized_pipeline(req: VideoRequest, seed: int) -> tuple[Any, Any]:
-    if req.mode == VideoMode.video_to_video:
-        from ltx_pipelines.ic_lora import ICLoraPipeline
-
-        pipeline = ICLoraPipeline(
-            distilled_checkpoint_path=_pick("ltx-2.3-22b-distilled-1.1.safetensors"),
-            gemma_root=_gemma_root(),
-            spatial_upsampler_path=_pick("ltx-2.3-spatial-upscaler-x2-1.1.safetensors"),
-            loras=[],
-            device=_device(),
-            **_quantization(),
-        )
-        return pipeline(prompt=req.prompt, seed=seed, height=req.height, width=req.width, num_frames=req.num_frames, frame_rate=req.frame_rate or 24.0, images=[], videos=[req.video_url])
-    if req.mode == VideoMode.audio_to_video:
-        from ltx_pipelines.a2vid_two_stage import A2VidPipelineTwoStage
-
-        pipeline = A2VidPipelineTwoStage(
-            checkpoint_path=_pick("ltx-2.3-22b-dev.safetensors", "ltx-2.3-22b-distilled-1.1.safetensors"),
-            distilled_lora=_distilled_lora(),
-            spatial_upsampler_path=_pick("ltx-2.3-spatial-upscaler-x2-1.1.safetensors"),
-            gemma_root=_gemma_root(),
-            loras=[],
-            device=_device(),
-            **_quantization(),
-        )
-        return pipeline(prompt=req.prompt, audio_path=req.audio_url, seed=seed, height=req.height, width=req.width, num_frames=req.num_frames, frame_rate=req.frame_rate or 24.0)
-    if req.mode == VideoMode.keyframe_interpolation:
-        from ltx_pipelines.keyframe_interpolation import KeyframeInterpolationPipeline
-
-        pipeline = KeyframeInterpolationPipeline(
-            checkpoint_path=_pick("ltx-2.3-22b-dev.safetensors", "ltx-2.3-22b-distilled-1.1.safetensors"),
-            distilled_lora=_distilled_lora(),
-            spatial_upsampler_path=_pick("ltx-2.3-spatial-upscaler-x2-1.1.safetensors"),
-            gemma_root=_gemma_root(),
-            loras=[],
-            device=_device(),
-            **_quantization(),
-        )
-        return pipeline(prompt=req.prompt, keyframes=req.keyframe_urls or [], seed=seed, height=req.height, width=req.width, num_frames=req.num_frames, frame_rate=req.frame_rate or 24.0)
-    if req.mode == VideoMode.retake:
-        from ltx_pipelines.retake import RetakePipeline
-
-        pipeline = RetakePipeline(
-            checkpoint_path=_pick("ltx-2.3-22b-dev.safetensors", "ltx-2.3-22b-distilled-1.1.safetensors"),
-            gemma_root=_gemma_root(),
-            device=_device(),
-            **_quantization(),
-        )
-        return pipeline(prompt=req.prompt, video_path=req.video_url, start_time=req.retake_start_time, end_time=req.retake_end_time, seed=seed)
-    if req.mode == VideoMode.hdr:
-        from ltx_pipelines.hdr_ic_lora import HDRICLoraPipeline
-
-        pipeline = HDRICLoraPipeline(
-            distilled_checkpoint_path=_pick("ltx-2.3-22b-distilled-1.1.safetensors"),
-            gemma_root=_gemma_root(),
-            spatial_upsampler_path=_pick("ltx-2.3-spatial-upscaler-x2-1.1.safetensors"),
-            device=_device(),
-            **_quantization(),
-        )
-        return pipeline(input=req.video_url, prompt=req.prompt, seed=seed, height=req.height, width=req.width, num_frames=req.num_frames)
-    raise ValueError(f"unsupported mode {req.mode}")
+    raise ValueError(
+        f"{req.mode.value} is disabled because this worker keeps exactly one LTX dev pipeline on GPU"
+    )
 
 
 async def materialize_inputs(req: VideoRequest, job_dir: Path) -> VideoRequest:

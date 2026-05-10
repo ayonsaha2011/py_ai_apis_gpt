@@ -10,10 +10,15 @@ pub fn validate_video_request(req: &VideoJobRequest, profile: &str) -> Result<()
     if req.prompt.trim().is_empty() {
         return Err(AppError::BadRequest("prompt is required".into()));
     }
+    if !matches!(req.mode, VideoMode::TextToVideo | VideoMode::ImageToVideo) {
+        return Err(AppError::BadRequest(
+            "this deployment allows only text_to_video and image_to_video so the LTX worker keeps exactly one full dev model on GPU".into(),
+        ));
+    }
     if (req.num_frames - 1) % 8 != 0 {
         return Err(AppError::BadRequest("num_frames must satisfy 8k+1".into()));
     }
-    let budget = ltx_budget(req, profile);
+    let budget = ltx_budget(profile);
     let output_pixels = req.width as u64 * req.height as u64;
     let pixel_frames = output_pixels * req.num_frames as u64;
     let native_request = req.width <= budget.max_native_side
@@ -124,27 +129,11 @@ struct LtxBudget {
     guidance: &'static str,
 }
 
-fn ltx_budget(req: &VideoJobRequest, profile: &str) -> LtxBudget {
+fn ltx_budget(profile: &str) -> LtxBudget {
     let profile = profile.to_ascii_lowercase();
     let h200 = profile.contains("h200");
     let h100 = profile.contains("h100");
-    let distilled_like = matches!(
-        req.mode,
-        VideoMode::Distilled | VideoMode::VideoToVideo | VideoMode::Hdr
-    );
 
-    if h200 && distilled_like {
-        return LtxBudget {
-            max_native_side: 1536,
-            max_frames: 241,
-            max_pixel_frames: 1024 * 576 * 241,
-            max_output_side: 4096,
-            max_output_pixels: 4096 * 2160,
-            max_upscaled_frames: 121,
-            label: "H200 distilled LTX",
-            guidance: "use up to 10 seconds at 1024x576, or reduce resolution for longer clips",
-        };
-    }
     if h200 {
         return LtxBudget {
             max_native_side: 1536,
@@ -154,19 +143,8 @@ fn ltx_budget(req: &VideoJobRequest, profile: &str) -> LtxBudget {
             max_output_pixels: 4096 * 2160,
             max_upscaled_frames: 121,
             label: "H200 full 22B bf16 LTX",
-            guidance: "use 5 seconds at 1024x576 for full 22B bf16; use distilled or reduce resolution for longer clips",
-        };
-    }
-    if h100 && distilled_like {
-        return LtxBudget {
-            max_native_side: 1024,
-            max_frames: 121,
-            max_pixel_frames: 1024 * 576 * 121,
-            max_output_side: 4096,
-            max_output_pixels: 4096 * 2160,
-            max_upscaled_frames: 121,
-            label: "H100 distilled LTX",
-            guidance: "use 5 seconds at 1024x576, or switch to H200 for longer HD clips",
+            guidance:
+                "use 5 seconds at 1024x576 for full 22B bf16, or reduce resolution for longer clips",
         };
     }
     if h100 {
@@ -178,20 +156,7 @@ fn ltx_budget(req: &VideoJobRequest, profile: &str) -> LtxBudget {
             max_output_pixels: 4096 * 2160,
             max_upscaled_frames: 121,
             label: "H100 full 22B bf16 LTX",
-            guidance:
-                "use 5 seconds at 768x448 for full 22B bf16; use distilled or H200 for larger clips",
-        };
-    }
-    if distilled_like {
-        return LtxBudget {
-            max_native_side: 1024,
-            max_frames: 121,
-            max_pixel_frames: 1024 * 576 * 121,
-            max_output_side: 1024,
-            max_output_pixels: 1024 * 1024,
-            max_upscaled_frames: 121,
-            label: "local distilled LTX",
-            guidance: "use 5 seconds at 1024x576, or reduce resolution for longer clips",
+            guidance: "use 5 seconds at 768x448 for full 22B bf16, or use H200 for larger clips",
         };
     }
     LtxBudget {
@@ -323,9 +288,10 @@ mod tests {
     }
 
     #[test]
-    fn accepts_h200_distilled_10s_hd_budget() {
+    fn rejects_h200_distilled_mode() {
         let req = base_request(VideoMode::Distilled, 1024, 576, 241);
-        assert!(validate_video_request(&req, "cloud_h200").is_ok());
+        let err = validate_video_request(&req, "cloud_h200").unwrap_err();
+        assert!(err.to_string().contains("exactly one full dev model"));
     }
 
     #[test]
@@ -341,9 +307,10 @@ mod tests {
     }
 
     #[test]
-    fn accepts_h100_distilled_5s_hd_budget() {
+    fn rejects_h100_distilled_mode() {
         let req = base_request(VideoMode::Distilled, 1024, 576, 121);
-        assert!(validate_video_request(&req, "cloud_h100").is_ok());
+        let err = validate_video_request(&req, "cloud_h100").unwrap_err();
+        assert!(err.to_string().contains("exactly one full dev model"));
     }
 
     #[test]
@@ -368,5 +335,12 @@ mod tests {
     fn rejects_square_4096_output_over_4k_pixels() {
         let req = base_request(VideoMode::TextToVideo, 4096, 4096, 121);
         assert!(validate_video_request(&req, "cloud_h200").is_err());
+    }
+
+    #[test]
+    fn rejects_distilled_when_full_dev_only() {
+        let req = base_request(VideoMode::Distilled, 768, 448, 121);
+        let err = validate_video_request(&req, "cloud_h200").unwrap_err();
+        assert!(err.to_string().contains("exactly one full dev model"));
     }
 }
