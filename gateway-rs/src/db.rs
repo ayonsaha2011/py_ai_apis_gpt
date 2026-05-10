@@ -63,6 +63,10 @@ impl Db {
             self.ensure_video_job_core_columns().await?;
             self.record_migration("005_video_job_core_columns").await?;
         }
+        if !self.migration_applied("006_sessions_schema").await? {
+            self.ensure_sessions_schema().await?;
+            self.record_migration("006_sessions_schema").await?;
+        }
         Ok(())
     }
 
@@ -133,6 +137,49 @@ impl Db {
         Ok(())
     }
 
+    async fn ensure_sessions_schema(&self) -> anyhow::Result<()> {
+        let columns = self.table_columns("sessions").await?;
+        let required = [
+            "token_hash",
+            "user_id",
+            "expires_at",
+            "created_at",
+            "revoked_at",
+        ];
+        if required
+            .iter()
+            .all(|required| columns.iter().any(|column| column == required))
+        {
+            self.conn
+                .execute(
+                    "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)",
+                    (),
+                )
+                .await?;
+            return Ok(());
+        }
+
+        self.conn
+            .execute_batch(
+                "
+                DROP TABLE IF EXISTS sessions_legacy_rebuild;
+                ALTER TABLE sessions RENAME TO sessions_legacy_rebuild;
+                CREATE TABLE sessions (
+                    token_hash TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    revoked_at INTEGER,
+                    FOREIGN KEY(user_id) REFERENCES users(id)
+                );
+                DROP TABLE sessions_legacy_rebuild;
+                CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+                ",
+            )
+            .await?;
+        Ok(())
+    }
+
     async fn add_column_if_missing(
         &self,
         table: &str,
@@ -154,17 +201,26 @@ impl Db {
     }
 
     async fn column_exists(&self, table: &str, column: &str) -> anyhow::Result<bool> {
+        Ok(self
+            .table_columns(table)
+            .await?
+            .iter()
+            .any(|name| name == column))
+    }
+
+    async fn table_columns(&self, table: &str) -> anyhow::Result<Vec<String>> {
+        if !is_identifier(table) {
+            anyhow::bail!("invalid migration identifier")
+        }
         let mut rows = self
             .conn
             .query(&format!("PRAGMA table_info({table})"), ())
             .await?;
+        let mut columns = Vec::new();
         while let Some(row) = rows.next().await? {
-            let name: String = row.get(1)?;
-            if name == column {
-                return Ok(true);
-            }
+            columns.push(row.get(1)?);
         }
-        Ok(false)
+        Ok(columns)
     }
 
     async fn migration_applied(&self, version: &str) -> anyhow::Result<bool> {
@@ -918,6 +974,7 @@ mod tests {
                 .await?
         );
         assert!(db.migration_applied("005_video_job_core_columns").await?);
+        assert!(db.migration_applied("006_sessions_schema").await?);
         Ok(())
     }
 
@@ -1026,6 +1083,74 @@ mod tests {
             .error
             .unwrap_or_default()
             .contains("missing params_json"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn migration_rebuilds_legacy_sessions_without_token_hash() -> anyhow::Result<()> {
+        let dir = tempdir()?;
+        let config = config_for(&dir.path().join("legacy-sessions.db"));
+        let db = Db::connect(&config).await?;
+        db.conn
+            .execute_batch(
+                "
+                CREATE TABLE schema_migrations (
+                    version TEXT PRIMARY KEY,
+                    applied_at INTEGER NOT NULL
+                );
+                INSERT INTO schema_migrations (version, applied_at) VALUES
+                    ('001_init', 1),
+                    ('002_user_roles', 1),
+                    ('003_video_metadata', 1),
+                    ('004_video_job_runtime_columns', 1),
+                    ('005_video_job_core_columns', 1);
+                CREATE TABLE users (
+                    id TEXT PRIMARY KEY,
+                    email TEXT NOT NULL UNIQUE,
+                    password_hash TEXT NOT NULL,
+                    role TEXT NOT NULL DEFAULT 'user',
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE sessions (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    user_id TEXT NOT NULL,
+                    token TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL
+                );
+                CREATE TABLE video_jobs (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    mode TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    prompt TEXT NOT NULL,
+                    params_json TEXT NOT NULL,
+                    effective_seed INTEGER NOT NULL,
+                    r2_key TEXT NOT NULL UNIQUE,
+                    result_url TEXT,
+                    error TEXT,
+                    progress REAL NOT NULL DEFAULT 0.0,
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    cancel_requested INTEGER NOT NULL DEFAULT 0,
+                    created_at INTEGER NOT NULL,
+                    started_at INTEGER,
+                    updated_at INTEGER NOT NULL,
+                    completed_at INTEGER
+                );
+                ",
+            )
+            .await?;
+        db.migrate().await?;
+        assert!(db.column_exists("sessions", "token_hash").await?);
+        assert!(!db.column_exists("sessions", "id").await?);
+        assert!(db.migration_applied("006_sessions_schema").await?);
+        let user = db
+            .create_user("session@example.com", "hash", "user")
+            .await?;
+        db.create_session("hashed-token", &user.id, 3600).await?;
+        assert!(db.user_by_session("hashed-token").await?.is_some());
+        db.revoke_session("hashed-token").await?;
+        assert!(db.user_by_session("hashed-token").await?.is_none());
         Ok(())
     }
 
