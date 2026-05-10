@@ -82,14 +82,20 @@ require_cmd() {
   fi
 }
 
-require_h100() {
+require_h100_or_h200() {
   require_cmd nvidia-smi
   local names
   names="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || true)"
-  if ! grep -qi "H100" <<<"$names"; then
-    if [[ "${ALLOW_NON_H100:-0}" != "1" ]]; then
-      echo "This deployment profile is H100-only. Detected GPU(s): ${names:-none}" >&2
-      echo "Set ALLOW_NON_H100=1 only for explicit non-production testing." >&2
+  local expected="H100|H200"
+  if [[ "${GATEWAY_PROFILE:-}" == *"h200"* ]]; then
+    expected="H200"
+  elif [[ "${GATEWAY_PROFILE:-}" == *"h100"* ]]; then
+    expected="H100"
+  fi
+  if ! grep -Eqi "$expected" <<<"$names"; then
+    if [[ "${ALLOW_NON_CLOUD_GPU:-${ALLOW_NON_H100:-0}}" != "1" ]]; then
+      echo "This deployment profile requires $expected for GATEWAY_PROFILE=${GATEWAY_PROFILE:-unset}. Detected GPU(s): ${names:-none}" >&2
+      echo "Set ALLOW_NON_CLOUD_GPU=1 only for explicit non-production testing." >&2
       exit 1
     fi
   fi
@@ -100,6 +106,7 @@ check_torch() {
   if [[ "$AI_PYTHON_MODE" == "system" ]]; then
     py="$AI_PYTHON_BIN"
     "$py" - <<'PY'
+import os
 import sys
 import torch
 print(f"python={sys.version.split()[0]}")
@@ -110,11 +117,14 @@ if not torch.cuda.is_available():
     raise SystemExit("CUDA is not available to PyTorch")
 name = torch.cuda.get_device_name(0)
 print(f"gpu0={name}")
-if "H100" not in name:
-    raise SystemExit(f"Expected H100 GPU, got {name}")
+profile = os.environ.get("GATEWAY_PROFILE", "cloud_h100").lower()
+expected = ("H200",) if "h200" in profile else ("H100",) if "h100" in profile else ("H100", "H200")
+if not any(item in name for item in expected):
+    raise SystemExit(f"Expected {' or '.join(expected)} GPU for GATEWAY_PROFILE={profile}, got {name}")
 PY
   else
     uv run --directory services/ltx-worker python - <<'PY'
+import os
 import sys
 import torch
 print(f"python={sys.version.split()[0]}")
@@ -125,8 +135,10 @@ if not torch.cuda.is_available():
     raise SystemExit("CUDA is not available to PyTorch")
 name = torch.cuda.get_device_name(0)
 print(f"gpu0={name}")
-if "H100" not in name:
-    raise SystemExit(f"Expected H100 GPU, got {name}")
+profile = os.environ.get("GATEWAY_PROFILE", "cloud_h100").lower()
+expected = ("H200",) if "h200" in profile else ("H100",) if "h100" in profile else ("H100", "H200")
+if not any(item in name for item in expected):
+    raise SystemExit(f"Expected {' or '.join(expected)} GPU for GATEWAY_PROFILE={profile}, got {name}")
 PY
   fi
 }
@@ -163,10 +175,10 @@ check_all() {
   fi
   require_secret ADMIN_API_KEY
   require_secret SERVICE_API_KEY
-  require_h100
+  require_h100_or_h200
   check_torch
   check_models
-  echo "H100 deployment checks passed."
+  echo "${GATEWAY_PROFILE:-cloud_h100} deployment checks passed."
 }
 
 pid_file() {

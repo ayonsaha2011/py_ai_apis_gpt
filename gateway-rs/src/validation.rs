@@ -18,14 +18,32 @@ pub fn validate_video_request(req: &VideoJobRequest, profile: &str) -> Result<()
     if (req.num_frames - 1) % 8 != 0 {
         return Err(AppError::BadRequest("num_frames must satisfy 8k+1".into()));
     }
-    let max_side = if profile.contains("h200") { 1536 } else { 1024 };
+    let budget = ltx_budget(req, profile);
+    let max_side = budget.max_side;
     if req.width > max_side || req.height > max_side {
         return Err(AppError::BadRequest(format!(
             "width/height exceed profile limit {max_side}"
         )));
     }
-    if req.num_frames > 257 {
-        return Err(AppError::BadRequest("num_frames exceeds 257".into()));
+    if let Some(steps) = req.num_inference_steps {
+        if !(1..=40).contains(&steps) {
+            return Err(AppError::BadRequest(
+                "num_inference_steps must be between 1 and 40".into(),
+            ));
+        }
+    }
+    if req.num_frames > budget.max_frames {
+        return Err(AppError::BadRequest(format!(
+            "num_frames exceeds {} for {}; {}",
+            budget.max_frames, budget.label, budget.guidance
+        )));
+    }
+    let pixel_frames = req.width as u64 * req.height as u64 * req.num_frames as u64;
+    if pixel_frames > budget.max_pixel_frames {
+        return Err(AppError::BadRequest(format!(
+            "request exceeds {} memory budget ({} pixel-frames > {}); {}",
+            budget.label, pixel_frames, budget.max_pixel_frames, budget.guidance
+        )));
     }
     match req.mode {
         VideoMode::TextToVideo | VideoMode::Distilled => {}
@@ -70,6 +88,78 @@ pub fn validate_video_request(req: &VideoJobRequest, profile: &str) -> Result<()
         }
     }
     Ok(())
+}
+
+struct LtxBudget {
+    max_side: u32,
+    max_frames: u32,
+    max_pixel_frames: u64,
+    label: &'static str,
+    guidance: &'static str,
+}
+
+fn ltx_budget(req: &VideoJobRequest, profile: &str) -> LtxBudget {
+    let profile = profile.to_ascii_lowercase();
+    let h200 = profile.contains("h200");
+    let h100 = profile.contains("h100");
+    let distilled_like = matches!(
+        req.mode,
+        VideoMode::Distilled | VideoMode::VideoToVideo | VideoMode::Hdr
+    );
+
+    if h200 && distilled_like {
+        return LtxBudget {
+            max_side: 1536,
+            max_frames: 241,
+            max_pixel_frames: 1024 * 576 * 241,
+            label: "H200 distilled LTX",
+            guidance: "use up to 10 seconds at 1024x576, or reduce resolution for longer clips",
+        };
+    }
+    if h200 {
+        return LtxBudget {
+            max_side: 1536,
+            max_frames: 121,
+            max_pixel_frames: 1024 * 576 * 121,
+            label: "H200 full 22B bf16 LTX",
+            guidance: "use 5 seconds at 1024x576 for full 22B bf16; use distilled or reduce resolution for longer clips",
+        };
+    }
+    if h100 && distilled_like {
+        return LtxBudget {
+            max_side: 1024,
+            max_frames: 121,
+            max_pixel_frames: 1024 * 576 * 121,
+            label: "H100 distilled LTX",
+            guidance: "use 5 seconds at 1024x576, or switch to H200 for longer HD clips",
+        };
+    }
+    if h100 {
+        return LtxBudget {
+            max_side: 1024,
+            max_frames: 121,
+            max_pixel_frames: 768 * 448 * 121,
+            label: "H100 full 22B bf16 LTX",
+            guidance:
+                "use 5 seconds at 768x448 for full 22B bf16; use distilled or H200 for larger clips",
+        };
+    }
+    if distilled_like {
+        return LtxBudget {
+            max_side: 1024,
+            max_frames: 121,
+            max_pixel_frames: 1024 * 576 * 121,
+            label: "local distilled LTX",
+            guidance: "use 5 seconds at 1024x576, or reduce resolution for longer clips",
+        };
+    }
+    LtxBudget {
+        max_side: 1024,
+        max_frames: 121,
+        max_pixel_frames: 768 * 448 * 121,
+        label: "local full 22B LTX",
+        guidance: "use 5 seconds at 768x448, or switch to the H200 profile for larger jobs",
+    }
 }
 
 pub fn effective_seed(user_id: &str, job_id: &Uuid, seed_hint: Option<u64>, prompt: &str) -> i64 {
@@ -150,5 +240,66 @@ mod tests {
             extra: None,
         };
         assert!(validate_video_request(&req, "local_rtx_5090").is_err());
+    }
+
+    fn base_request(mode: VideoMode, width: u32, height: u32, frames: u32) -> VideoJobRequest {
+        VideoJobRequest {
+            mode,
+            prompt: "x".into(),
+            negative_prompt: None,
+            width,
+            height,
+            num_frames: frames,
+            frame_rate: None,
+            guidance_scale: None,
+            num_inference_steps: Some(40),
+            seed_hint: None,
+            image_url: None,
+            video_url: None,
+            audio_url: None,
+            keyframe_urls: None,
+            retake_start_time: None,
+            retake_end_time: None,
+            enhance_prompt: None,
+            extra: None,
+        }
+    }
+
+    #[test]
+    fn accepts_h200_full_22b_5s_hd_budget() {
+        let req = base_request(VideoMode::TextToVideo, 1024, 576, 121);
+        assert!(validate_video_request(&req, "cloud_h200").is_ok());
+    }
+
+    #[test]
+    fn rejects_h200_full_22b_10s_hd_budget() {
+        let req = base_request(VideoMode::TextToVideo, 1024, 576, 241);
+        let err = validate_video_request(&req, "cloud_h200").unwrap_err();
+        assert!(err.to_string().contains("H200 full 22B bf16"));
+    }
+
+    #[test]
+    fn accepts_h200_distilled_10s_hd_budget() {
+        let req = base_request(VideoMode::Distilled, 1024, 576, 241);
+        assert!(validate_video_request(&req, "cloud_h200").is_ok());
+    }
+
+    #[test]
+    fn accepts_h100_full_22b_5s_sd_budget() {
+        let req = base_request(VideoMode::TextToVideo, 768, 448, 121);
+        assert!(validate_video_request(&req, "cloud_h100").is_ok());
+    }
+
+    #[test]
+    fn rejects_h100_full_22b_5s_hd_budget() {
+        let req = base_request(VideoMode::TextToVideo, 1024, 576, 121);
+        let err = validate_video_request(&req, "cloud_h100").unwrap_err();
+        assert!(err.to_string().contains("H100 full 22B bf16"));
+    }
+
+    #[test]
+    fn accepts_h100_distilled_5s_hd_budget() {
+        let req = base_request(VideoMode::Distilled, 1024, 576, 121);
+        assert!(validate_video_request(&req, "cloud_h100").is_ok());
     }
 }

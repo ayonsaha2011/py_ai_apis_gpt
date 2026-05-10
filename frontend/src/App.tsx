@@ -238,10 +238,54 @@ function framesForDuration(duration: string) {
   return durationOptions.find((option) => option.value === duration)?.frames || "121";
 }
 
+function videoBudgetWarning(form: VideoForm, profile: string): string {
+  const width = Number(form.width);
+  const height = Number(form.height);
+  const frames = Number(form.frames);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || !Number.isFinite(frames)) return "";
+  const distilledLike = form.mode === "distilled" || form.mode === "video_to_video" || form.mode === "hdr";
+  const lowered = profile.toLowerCase();
+  const h200 = lowered.includes("h200");
+  const h100 = lowered.includes("h100");
+  let maxFrames = 121;
+  let maxPixelFrames = 768 * 448 * 121;
+  let label = "local full 22B";
+  let guidance = "Use 5 seconds at 768x448, or select a cloud profile for larger jobs.";
+  if (h200 && distilledLike) {
+    maxFrames = 241;
+    maxPixelFrames = 1024 * 576 * 241;
+    label = "H200 distilled/specialized";
+    guidance = "Use 10 seconds or less at 1024x576, or reduce resolution for longer clips.";
+  } else if (h200) {
+    maxFrames = 121;
+    maxPixelFrames = 1024 * 576 * 121;
+    label = "H200 full 22B bf16";
+    guidance = "Use 5 seconds at 1024x576 for full 22B, or switch to Fast distilled for longer clips.";
+  } else if (h100 && distilledLike) {
+    maxFrames = 121;
+    maxPixelFrames = 1024 * 576 * 121;
+    label = "H100 distilled/specialized";
+    guidance = "Use 5 seconds at 1024x576, or switch to H200 for longer HD clips.";
+  } else if (h100) {
+    maxFrames = 121;
+    maxPixelFrames = 768 * 448 * 121;
+    label = "H100 full 22B bf16";
+    guidance = "Use 5 seconds at 768x448 for full 22B, or switch to Fast distilled/H200 for larger clips.";
+  } else if (distilledLike) {
+    maxPixelFrames = 1024 * 576 * 121;
+    label = "local distilled/specialized";
+    guidance = "Use 5 seconds at 1024x576, or reduce resolution for longer clips.";
+  }
+  if (frames > maxFrames) return `${label} jobs allow ${maxFrames} frames here. ${guidance}`;
+  if (width * height * frames > maxPixelFrames) return `${label} memory budget is exceeded. ${guidance}`;
+  return "";
+}
+
 function App() {
   const location = useLocation();
   const [config, setConfig] = useState<Config>(savedConfig);
   const [health, setHealth] = useState("offline");
+  const [gatewayProfile, setGatewayProfile] = useState("cloud_h200");
   const [user, setUser] = useState<User | null>(null);
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
@@ -285,8 +329,9 @@ function App() {
 
   const refreshMe = useCallback(async () => {
     try {
-      const data = await request<{ status?: string }>("/health");
+      const data = await request<{ status?: string; profile?: string }>("/status");
       setHealth(data.status || "ok");
+      if (data.profile) setGatewayProfile(data.profile);
     } catch {
       setHealth("offline");
     }
@@ -349,7 +394,7 @@ function App() {
             <Route path="/login" element={<AuthPage mode="login" busy={busy} notify={notify} onAuth={(email, password) => auth("login", email, password)} />} />
             <Route path="/register" element={<AuthPage mode="register" busy={busy} notify={notify} onAuth={(email, password) => auth("register", email, password)} />} />
             <Route path="/chat" element={<ChatPage request={request} apiBase={apiBase} token={config.token} notify={notify} />} />
-            <Route path="/video" element={<VideoPage request={request} apiBase={apiBase} token={config.token} notify={notify} />} />
+            <Route path="/video" element={<VideoPage request={request} apiBase={apiBase} token={config.token} profile={gatewayProfile} notify={notify} />} />
             <Route path="/rag" element={<RagPage request={request} notify={notify} />} />
             <Route path="/history" element={<HistoryPage request={request} notify={notify} />} />
             <Route path="/admin" element={<AdminPage adminRequest={adminRequest} notify={notify} />} />
@@ -712,11 +757,13 @@ function VideoPage({
   request,
   apiBase,
   token,
+  profile,
   notify,
 }: {
   request: <T>(path: string, init?: RequestInit) => Promise<T>;
   apiBase: string;
   token: string;
+  profile: string;
   notify: (message: string) => void;
 }) {
   const [form, setForm] = useState<VideoForm>({
@@ -748,6 +795,7 @@ function VideoPage({
   const mediaRequirements = videoRequirements(form.mode);
   const frameValid = /^\d+$/.test(form.frames) && (Number(form.frames) - 1) % 8 === 0;
   const sizeValid = Number(form.width) % 32 === 0 && Number(form.height) % 32 === 0;
+  const budgetWarning = videoBudgetWarning(form, profile);
 
   function patch<K extends keyof VideoForm>(key: K, value: VideoForm[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -801,6 +849,14 @@ function VideoPage({
 
   async function submit(event: FormEvent) {
     event.preventDefault();
+    if (!sizeValid || !frameValid) {
+      notify("Video size must be divisible by 32 and frames must satisfy 8k+1.");
+      return;
+    }
+    if (budgetWarning) {
+      notify(budgetWarning);
+      return;
+    }
     const payload: Record<string, unknown> = {
       mode: form.mode,
       prompt: form.prompt,
@@ -869,6 +925,7 @@ function VideoPage({
             <div className="flex flex-wrap gap-2">
               <QualityPill ok={sizeValid} label="32px grid" />
               <QualityPill ok={frameValid} label="8k+1 frames" />
+              <QualityPill ok={!budgetWarning} label="GPU budget" />
             </div>
           </div>
 
@@ -941,6 +998,11 @@ function VideoPage({
               Prompt
               <textarea className="textarea min-h-36 text-base leading-7" value={form.prompt} onChange={(event) => patch("prompt", event.target.value)} />
             </label>
+            {budgetWarning ? (
+              <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm font-semibold leading-6 text-amber-800">
+                {budgetWarning}
+              </div>
+            ) : null}
             <label className="field">
               Negative prompt
               <textarea className="textarea min-h-20" value={form.negative} onChange={(event) => patch("negative", event.target.value)} />
@@ -953,7 +1015,7 @@ function VideoPage({
                   <Trash2 size={16} />
                   Reset
                 </button>
-                <button className="btn btn-primary" type="submit">
+                <button className="btn btn-primary" type="submit" disabled={!sizeValid || !frameValid || Boolean(budgetWarning) || !form.prompt.trim()}>
                   <Play size={16} />
                   Queue video
                 </button>
@@ -991,6 +1053,7 @@ function VideoPage({
             </div>
             <div className="grid gap-2 text-sm">
               <SetupRow icon={<Video size={15} />} label="Mode" value={modeLabels[form.mode]} />
+              <SetupRow icon={<Server size={15} />} label="Profile" value={profile} />
               <SetupRow icon={<ImageIcon size={15} />} label="Canvas" value={`${form.width}x${form.height}`} />
               <SetupRow icon={<Clock3 size={15} />} label="Duration" value={`${form.duration}s`} />
               <SetupRow icon={<Clapperboard size={15} />} label="Frames" value={form.frames} />

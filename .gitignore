@@ -3,6 +3,7 @@
 .env.*
 !.env.example
 !.env.h100.example
+!.env.h200.example
 *.pem
 *.key
 *.crt

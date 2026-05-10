@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     )
     gemma_root: Path | None = Field(default=None, validation_alias=AliasChoices("LTX_GEMMA_ROOT", "GEMMA_ROOT"))
     cuda_device: str = Field(default="cuda:0", validation_alias=AliasChoices("LTX_CUDA_DEVICE", "CUDA_DEVICE"))
+    gpu_profile: str = Field(default="local_rtx_5090", validation_alias=AliasChoices("LTX_GPU_PROFILE", "GATEWAY_PROFILE"))
     quantization: str = Field(default="fp8_cast", validation_alias=AliasChoices("LTX_QUANTIZATION", "QUANTIZATION"))
     torch_compile_ltx: bool = Field(
         default=False,

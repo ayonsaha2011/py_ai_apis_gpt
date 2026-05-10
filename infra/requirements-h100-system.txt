@@ -1,4 +1,4 @@
-# System Python deployment dependencies for Ubuntu 24.04 H100 images that
+# System Python deployment dependencies for Ubuntu 24.04 H100/H200 images that
 # already provide CUDA PyTorch and matching torchaudio.
 #
 # Install torch, torchaudio, and torchvision before this file. For CUDA 12.8:

@@ -55,10 +55,18 @@ uv run --project services/ltx-worker pytest
 
 GPU integration tests require the real model assets and are marked separately.
 
-## H100 Ubuntu Deployment
+## Cloud GPU Deployment
 
-For Ubuntu 24.04 H100 servers running full LTX-2.3 22B BF16, use:
+For Ubuntu 24.04 H100 servers, use:
 
 - `docs/h100-ubuntu-deploy.md`
 - `.env.h100.example`
 - `scripts/deploy_h100.sh`
+
+For Ubuntu 24.04 H200 servers, use:
+
+- `docs/h200-ubuntu-deploy.md`
+- `.env.h200.example`
+- `scripts/deploy_h200.sh`
+
+The profiles are separate. H100 defaults to `GATEWAY_PROFILE=cloud_h100`, `.env.h100`, `.venv-h100`, and `runtime/h100`. H200 defaults to `GATEWAY_PROFILE=cloud_h200`, `.env.h200`, `.venv-h200`, and `runtime/h200`.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -63,11 +64,88 @@ def runtime_status() -> dict[str, Any]:
     }
 
 
+def is_cuda_oom(exc: BaseException) -> bool:
+    return isinstance(exc, torch.OutOfMemoryError) or "CUDA out of memory" in str(exc)
+
+
+def release_cuda_memory(clear_pipelines: bool = False) -> None:
+    if clear_pipelines:
+        _two_stage_pipeline.cache_clear()
+        _distilled_pipeline.cache_clear()
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        try:
+            torch.cuda.ipc_collect()
+        except RuntimeError:
+            pass
+
+
 def ensure_runtime_ready() -> None:
     if settings.cuda_device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(
             "CUDA is required for LTX generation but this worker loaded a CPU-only PyTorch runtime. "
             "Install the locked CUDA PyTorch environment with Python 3.12, then restart the worker."
+    )
+
+
+def validate_ltx_budget(req: VideoRequest) -> None:
+    if req.width % 32 != 0 or req.height % 32 != 0:
+        raise ValueError("width and height must be divisible by 32")
+    if (req.num_frames - 1) % 8 != 0:
+        raise ValueError("num_frames must satisfy 8k+1")
+    if req.num_inference_steps is not None and not 1 <= req.num_inference_steps <= 40:
+        raise ValueError("num_inference_steps must be between 1 and 40")
+
+    profile = settings.gpu_profile.lower()
+    h200 = "h200" in profile
+    h100 = "h100" in profile
+    distilled_like = req.mode in {VideoMode.distilled, VideoMode.video_to_video, VideoMode.hdr}
+    if h200 and distilled_like:
+        max_side = 1536
+        max_frames = 241
+        max_pixel_frames = 1024 * 576 * 241
+        label = "H200 distilled LTX"
+        guidance = "use up to 10 seconds at 1024x576, or reduce resolution for longer clips"
+    elif h200:
+        max_side = 1536
+        max_frames = 121
+        max_pixel_frames = 1024 * 576 * 121
+        label = "H200 full 22B bf16 LTX"
+        guidance = "use 5 seconds at 1024x576 for full 22B bf16; use distilled or reduce resolution for longer clips"
+    elif h100 and distilled_like:
+        max_side = 1024
+        max_frames = 121
+        max_pixel_frames = 1024 * 576 * 121
+        label = "H100 distilled LTX"
+        guidance = "use 5 seconds at 1024x576, or switch to H200 for longer HD clips"
+    elif h100:
+        max_side = 1024
+        max_frames = 121
+        max_pixel_frames = 768 * 448 * 121
+        label = "H100 full 22B bf16 LTX"
+        guidance = "use 5 seconds at 768x448 for full 22B bf16; use distilled or H200 for larger clips"
+    elif distilled_like:
+        max_side = 1024
+        max_frames = 121
+        max_pixel_frames = 1024 * 576 * 121
+        label = "local distilled LTX"
+        guidance = "use 5 seconds at 1024x576, or reduce resolution for longer clips"
+    else:
+        max_side = 1024
+        max_frames = 121
+        max_pixel_frames = 768 * 448 * 121
+        label = "local full 22B LTX"
+        guidance = "use 5 seconds at 768x448, or switch to the H200 profile for larger jobs"
+
+    if req.width > max_side or req.height > max_side:
+        raise ValueError(f"width/height exceed profile limit {max_side}")
+    if req.num_frames > max_frames:
+        raise ValueError(f"num_frames exceeds {max_frames} for {label}; {guidance}")
+    pixel_frames = req.width * req.height * req.num_frames
+    if pixel_frames > max_pixel_frames:
+        raise ValueError(
+            f"request exceeds {label} memory budget ({pixel_frames} pixel-frames > {max_pixel_frames}); {guidance}"
         )
 
 

@@ -188,8 +188,12 @@ create_env_file() {
     warn "$ENV_FILE already exists; not overwriting."
     return
   fi
-  info "Creating $ENV_FILE from .env.h100.example..."
-  cp "$ROOT_DIR/.env.h100.example" "$ENV_FILE"
+  local template="$ROOT_DIR/.env.h100.example"
+  if [[ "$ENV_FILE" == *".env.h200" && -f "$ROOT_DIR/.env.h200.example" ]]; then
+    template="$ROOT_DIR/.env.h200.example"
+  fi
+  info "Creating $ENV_FILE from $(basename "$template")..."
+  cp "$template" "$ENV_FILE"
   local admin_key service_key
   admin_key="$(make_secret)"
   service_key="$(make_secret)"
@@ -278,7 +282,13 @@ check_gpu() {
   require_cmd nvidia-smi
   local names
   names="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || true)"
-  grep -qi "H100" <<<"$names" || fail "Expected H100 GPU, detected: ${names:-none}"
+  local expected="H100|H200"
+  if [[ "${GATEWAY_PROFILE:-}" == *"h200"* ]]; then
+    expected="H200"
+  elif [[ "${GATEWAY_PROFILE:-}" == *"h100"* ]]; then
+    expected="H100"
+  fi
+  grep -Eqi "$expected" <<<"$names" || fail "Expected $expected GPU for GATEWAY_PROFILE=${GATEWAY_PROFILE:-unset}, detected: ${names:-none}"
   local cuda
   cuda="$(nvidia-smi | sed -n 's/.*CUDA Version: \([0-9.]*\).*/\1/p' | head -n 1)"
   [[ -n "$cuda" ]] || fail "Could not read CUDA version from nvidia-smi"
@@ -296,6 +306,7 @@ check_torch() {
   local py="$VENV_DIR/bin/python"
   [[ -x "$py" ]] || fail "Missing venv python at $py"
   "$py" - <<'PY'
+import os
 import sys
 import torch
 
@@ -307,8 +318,10 @@ if not torch.cuda.is_available():
     raise SystemExit("CUDA is not available to PyTorch")
 name = torch.cuda.get_device_name(0)
 print(f"gpu0={name}")
-if "H100" not in name:
-    raise SystemExit(f"Expected H100 GPU, got {name}")
+profile = os.environ.get("GATEWAY_PROFILE", "cloud_h100").lower()
+expected = ("H200",) if "h200" in profile else ("H100",) if "h100" in profile else ("H100", "H200")
+if not any(item in name for item in expected):
+    raise SystemExit(f"Expected {' or '.join(expected)} GPU for GATEWAY_PROFILE={profile}, got {name}")
 if not str(torch.version.cuda or "").startswith("12.8"):
     raise SystemExit(f"Expected CUDA 12.8 PyTorch build, got {torch.version.cuda}")
 PY
@@ -362,7 +375,7 @@ full_check() {
   check_models
   [[ -x "$QDRANT_BIN" ]] || fail "Missing Qdrant binary at $QDRANT_BIN"
   [[ -x "$ROOT_DIR/gateway-rs/target/release/gateway-rs" ]] || fail "Missing gateway release binary; run deploy/setup"
-  info "Full H100 system check passed."
+  info "Full ${GATEWAY_PROFILE:-cloud_h100} system check passed."
 }
 
 setup_all() {
