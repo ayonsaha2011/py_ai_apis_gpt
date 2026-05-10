@@ -1,0 +1,96 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+!.env.h100.example
+*.pem
+*.key
+*.crt
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.coverage
+htmlcov/
+.venv/
+**/.venv/
+venv/
+env/
+.uv-cache/
+uv.lock.tmp
+
+# Node and frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Rust
+target/
+gateway-rs/target/
+Cargo.lock.tmp
+*.pdb
+
+# Build and tooling caches
+dist/
+build/
+.cache/
+.parcel-cache/
+.turbo/
+*.tsbuildinfo
+
+# Runtime state
+logs/
+runtime/
+storage/**
+!storage/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+*.pid
+
+# Model caches and large ML assets
+models/**
+!models/.gitkeep
+third_party/LTX-2/
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.gguf
+*.bin
+*.tar
+*.tar.gz
+*.zip
+
+# Generated media and artifacts
+*.mp4
+*.mov
+*.webm
+*.avi
+*.mkv
+*.wav
+*.mp3
+*.flac
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+*.swp
+*.swo

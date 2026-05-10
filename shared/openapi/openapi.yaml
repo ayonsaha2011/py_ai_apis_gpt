@@ -1,0 +1,66 @@
+openapi: 3.1.0
+info:
+  title: py_ai_apis_gpt Gateway API
+  version: 0.1.0
+paths:
+  /auth/register:
+    post:
+      summary: Register a user and create an opaque bearer session.
+  /auth/login:
+    post:
+      summary: Create an opaque bearer session.
+  /auth/logout:
+    post:
+      summary: Revoke the current bearer session.
+  /auth/me:
+    get:
+      summary: Return the authenticated user.
+  /v1/chat/completions:
+    post:
+      summary: OpenAI-compatible chat completions with optional streaming and RAG.
+  /rag/collections:
+    get:
+      summary: List per-user RAG collections.
+    post:
+      summary: Create a per-user RAG collection.
+  /rag/ingest:
+    post:
+      summary: Ingest text into a per-user RAG collection.
+  /rag/documents/{id}:
+    delete:
+      summary: Delete a per-user RAG document from its collection.
+  /history/sessions:
+    get:
+      summary: List per-user chat sessions.
+  /history/chat:
+    get:
+      summary: List per-user chat messages.
+  /history/videos:
+    get:
+      summary: List per-user video jobs.
+  /v1/video/jobs:
+    post:
+      summary: Submit an LTX-2.3 video generation job.
+  /v1/video/jobs/{id}:
+    get:
+      summary: Get video job state.
+    delete:
+      summary: Cancel a queued or running video job.
+  /v1/video/jobs/{id}/events:
+    get:
+      summary: Stream video job state changes using SSE.
+  /admin/gpus:
+    get:
+      summary: List visible NVIDIA GPUs.
+  /admin/services:
+    get:
+      summary: List runtime-managed services.
+  /admin/services/{name}/start:
+    post:
+      summary: Start a service through the configured runtime backend.
+  /admin/services/{name}/stop:
+    post:
+      summary: Stop a service through the configured runtime backend.
+  /admin/models/{model_id}/start:
+    post:
+      summary: Load a configurable text model on the text worker.

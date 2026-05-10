@@ -1,0 +1,313 @@
+{
+  "info": {
+    "name": "py_ai_apis_gpt Gateway",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "8bd56f10-f159-4e67-b9de-fb98cc93ed4c"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{access_token}}",
+        "type": "string"
+      }
+    ]
+  },
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Gateway Health",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/health"
+          }
+        },
+        {
+          "name": "Gateway Status",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/status"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Auth",
+      "item": [
+        {
+          "name": "Register",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 201) {",
+                  "  const body = pm.response.json();",
+                  "  pm.environment.set('access_token', body.access_token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "url": "{{base_url}}/auth/register"
+          }
+        },
+        {
+          "name": "Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  pm.environment.set('access_token', body.access_token);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{email}}\",\n  \"password\": \"{{password}}\"\n}"
+            },
+            "url": "{{base_url}}/auth/login"
+          }
+        },
+        {
+          "name": "Me",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/auth/me"
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/auth/logout"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Chat",
+      "item": [
+        {
+          "name": "Chat Completion",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{text_model}}\",\n  \"session_id\": \"{{session_id}}\",\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"Write a concise explanation of continuous batching.\"}\n  ],\n  \"stream\": false,\n  \"use_rag\": false,\n  \"max_tokens\": 512,\n  \"temperature\": 0.7,\n  \"top_p\": 0.95\n}"
+            },
+            "url": "{{base_url}}/v1/chat/completions"
+          }
+        },
+        {
+          "name": "Chat Completion With RAG",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"model\": \"{{text_model}}\",\n  \"session_id\": \"{{session_id}}\",\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"What does the ingested document say about queues?\"}\n  ],\n  \"stream\": false,\n  \"use_rag\": true,\n  \"rag_collection\": \"{{rag_collection}}\",\n  \"max_tokens\": 512\n}"
+            },
+            "url": "{{base_url}}/v1/chat/completions"
+          }
+        }
+      ]
+    },
+    {
+      "name": "RAG",
+      "item": [
+        {
+          "name": "Create Collection",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"{{rag_collection}}\"\n}"
+            },
+            "url": "{{base_url}}/rag/collections"
+          }
+        },
+        {
+          "name": "List Collections",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/rag/collections"
+          }
+        },
+        {
+          "name": "Ingest Text",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 200) {",
+                  "  const body = pm.response.json();",
+                  "  if (body.document_id) pm.environment.set('document_id', body.document_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"collection\": \"{{rag_collection}}\",\n  \"source_name\": \"queue-notes\",\n  \"texts\": [\n    \"The gateway admits concurrent users through bounded fair queues and routes GPU-heavy work through a single local heavy-job gate.\"\n  ],\n  \"metadata\": {\"kind\": \"note\"}\n}"
+            },
+            "url": "{{base_url}}/rag/ingest"
+          }
+        },
+        {
+          "name": "Delete Document",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/rag/documents/{{document_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Video",
+      "item": [
+        {
+          "name": "Create Text Video Job",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const body = pm.response.json();",
+                  "  pm.environment.set('video_job_id', body.job_id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"mode\": \"text_to_video\",\n  \"prompt\": \"A cinematic shot of a glass robot assembling a small satellite in a clean lab\",\n  \"negative_prompt\": \"blur, low quality, distorted\",\n  \"width\": 768,\n  \"height\": 512,\n  \"num_frames\": 97,\n  \"frame_rate\": 24,\n  \"guidance_scale\": 7.5,\n  \"num_inference_steps\": 40\n}"
+            },
+            "url": "{{base_url}}/v1/video/jobs"
+          }
+        },
+        {
+          "name": "Get Video Job",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/v1/video/jobs/{{video_job_id}}"
+          }
+        },
+        {
+          "name": "Cancel Video Job",
+          "request": {
+            "method": "DELETE",
+            "url": "{{base_url}}/v1/video/jobs/{{video_job_id}}"
+          }
+        }
+      ]
+    },
+    {
+      "name": "History",
+      "item": [
+        {
+          "name": "Chat Sessions",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/history/sessions"
+          }
+        },
+        {
+          "name": "Chat Messages",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/history/chat?limit=50"
+          }
+        },
+        {
+          "name": "Video Jobs",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/history/videos?limit=50"
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin",
+      "auth": { "type": "noauth" },
+      "item": [
+        {
+          "name": "GPUs",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Admin-Key", "value": "{{admin_key}}" }],
+            "url": "{{base_url}}/admin/gpus"
+          }
+        },
+        {
+          "name": "Services",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Admin-Key", "value": "{{admin_key}}" }],
+            "url": "{{base_url}}/admin/services"
+          }
+        },
+        {
+          "name": "Start Text Worker",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "X-Admin-Key", "value": "{{admin_key}}" }],
+            "url": "{{base_url}}/admin/services/text-worker/start"
+          }
+        },
+        {
+          "name": "Start LTX Worker",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "X-Admin-Key", "value": "{{admin_key}}" }],
+            "url": "{{base_url}}/admin/services/ltx-worker/start"
+          }
+        },
+        {
+          "name": "Start Text Model",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "X-Admin-Key", "value": "{{admin_key}}" }],
+            "url": "{{base_url}}/admin/models/{{text_model}}/start"
+          }
+        }
+      ]
+    }
+  ]
+}
+
