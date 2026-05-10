@@ -100,6 +100,12 @@ bash scripts/deploy_h100.sh stop all
 
 Logs and PID files are stored under `runtime/h100/`.
 
+After `git pull`, restarting the gateway is enough to pick up Rust gateway changes. The script rebuilds `gateway-rs/target/release/gateway-rs` automatically when Rust source, migrations, or Cargo metadata are newer than the current binary:
+
+```bash
+bash scripts/deploy_h100.sh restart gateway
+```
+
 ## Video Request Defaults
 
 For the full 22B BF16 H100 profile, use the safer SD budget:

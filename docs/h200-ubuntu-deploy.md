@@ -48,6 +48,12 @@ For a local smoke run, use `TURSO_DB_URL=file:storage/gateway.db`. For productio
 
 For H100 servers, use `docs/h100-ubuntu-deploy.md` and `scripts/deploy_h100.sh`.
 
+After `git pull`, restart the gateway to pick up Rust gateway changes. The H200 wrapper rebuilds the release binary automatically when Rust source, migrations, or Cargo metadata are newer than the current binary:
+
+```bash
+bash scripts/deploy_h200.sh restart gateway
+```
+
 For full 22B BF16 H200 text-to-video, the gateway admits 5-second HD jobs at `1024x576` and `121` frames. Distilled and compatible specialized modes admit 10-second HD jobs at `1024x576` and `241` frames. Larger requests are rejected before GPU allocation.
 
 4K is supported as output-only upscaling for 5-second jobs. The API response and history include `metadata.upscaled`, `render_width`, `render_height`, `output_width`, and `output_height` so operators can distinguish native render cost from final artifact size.

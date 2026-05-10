@@ -8,4 +8,4 @@ export AI_RUNTIME_DIR="${AI_RUNTIME_DIR:-"$ROOT_DIR/runtime/h200"}"
 export AI_VENV_DIR="${AI_VENV_DIR:-"$ROOT_DIR/.venv-h200"}"
 export GATEWAY_PROFILE="${GATEWAY_PROFILE:-cloud_h200}"
 
-exec "$ROOT_DIR/scripts/h100-services.sh" "$@"
+exec bash "$ROOT_DIR/scripts/h100-services.sh" "$@"

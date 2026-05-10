@@ -254,10 +254,25 @@ stop_process() {
 
 gateway_command() {
   local bin="$ROOT_DIR/gateway-rs/target/release/gateway-rs"
-  if [[ ! -x "$bin" ]]; then
+  if gateway_needs_build "$bin"; then
+    echo "Building Rust gateway release binary..." >&2
     cargo build --manifest-path "$ROOT_DIR/gateway-rs/Cargo.toml" --release >&2
   fi
   printf 'exec %q' "$bin"
+}
+
+gateway_needs_build() {
+  local bin="$1"
+  [[ ! -x "$bin" ]] && return 0
+  [[ "$ROOT_DIR/gateway-rs/Cargo.toml" -nt "$bin" ]] && return 0
+  [[ "$ROOT_DIR/gateway-rs/Cargo.lock" -nt "$bin" ]] && return 0
+  if find "$ROOT_DIR/gateway-rs/src" -type f -newer "$bin" -print -quit | grep -q .; then
+    return 0
+  fi
+  if [[ -d "$ROOT_DIR/gateway-rs/migrations" ]] && find "$ROOT_DIR/gateway-rs/migrations" -type f -newer "$bin" -print -quit | grep -q .; then
+    return 0
+  fi
+  return 1
 }
 
 python_service_command() {
