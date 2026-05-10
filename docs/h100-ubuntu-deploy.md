@@ -13,6 +13,7 @@ It runs native processes instead of Docker for the Python workers so a preinstal
 - PyTorch: CUDA build with `torch.cuda.is_available() == True`. The deploy script creates `.venv-h100` with `--system-site-packages` so a preinstalled torch 2.8.0+cu128 runtime remains visible.
 - LTX: full `ltx-2.3-22b-dev.safetensors`, `LTX_QUANTIZATION=none`, BF16 model execution, one heavy LTX job per H100.
 - Text: `google/gemma-3-12b-it-qat-q4_0-unquantized` under `TEXT_MODEL_DIR`.
+- LTX Gemma root defaults to `TEXT_MODEL_DIR` on H100 so the same 24GB Gemma assets are reused.
 
 PyTorch's [official local install page](https://docs.pytorch.org/get-started/locally/) documents CUDA-enabled pip installs and CUDA availability verification. The [previous-version page](https://docs.pytorch.org/get-started/previous-versions/) also lists CUDA 12.8 wheel indexes for PyTorch 2.7.x; use your image's validated torch 2.8.0+cu128 build only if it passes the checks below.
 
@@ -74,7 +75,10 @@ Download the full LTX assets and text model:
 python3.12 scripts/download_ltx_assets.py \
   --model-dir models/ltx-2.3 \
   --text-model-id google/gemma-3-12b-it-qat-q4_0-unquantized \
-  --text-model-dir models/text/gemma-3-12b-it-qat-q4_0-unquantized
+  --text-model-dir models/text/gemma-3-12b-it-qat-q4_0-unquantized \
+  --ltx-gemma-root models/text/gemma-3-12b-it-qat-q4_0-unquantized \
+  --hf-cache-dir /mnt/models/.cache/huggingface \
+  --min-free-gb 120
 ```
 
 Required LTX files:
@@ -82,8 +86,7 @@ Required LTX files:
 - `models/ltx-2.3/ltx-2.3-22b-dev.safetensors`
 - `models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors`
 - `models/ltx-2.3/ltx-2.3-temporal-upscaler-x2-1.0.safetensors`
-- `models/ltx-2.3/gemma-3-12b/config.json`
-- `models/text/gemma-3-12b-it-qat-q4_0-unquantized/config.json`
+- `models/text/gemma-3-12b-it-qat-q4_0-unquantized/config.json` for both `TEXT_MODEL_DIR` and `LTX_GEMMA_ROOT`
 
 ## Environment
 

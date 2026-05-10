@@ -84,7 +84,10 @@ load_env_if_present() {
   export TEXT_MODEL_DIR="${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}"
   export TEXT_MODEL_REGISTRY="${TEXT_MODEL_REGISTRY:-google/gemma-3-12b-it-qat-q4_0-unquantized}"
   export LTX_MODEL_DIR="${LTX_MODEL_DIR:-models/ltx-2.3}"
-  export LTX_GEMMA_ROOT="${LTX_GEMMA_ROOT:-models/ltx-2.3/gemma-3-12b}"
+  export LTX_GEMMA_ROOT="${LTX_GEMMA_ROOT:-$TEXT_MODEL_DIR}"
+  export HF_HOME="${HF_HOME:-$ROOT_DIR/models/.cache/huggingface}"
+  export MODEL_MIN_FREE_GB="${MODEL_MIN_FREE_GB:-120}"
+  export HF_HUB_DOWNLOAD_THREADS="${HF_HUB_DOWNLOAD_THREADS:-4}"
   export LTX_CUDA_DEVICE="${LTX_CUDA_DEVICE:-cuda:0}"
   export LTX_QUANTIZATION="${LTX_QUANTIZATION:-none}"
   export LTX_TORCH_COMPILE="${LTX_TORCH_COMPILE:-false}"
@@ -111,6 +114,13 @@ require_env_file() {
 
 ensure_dirs() {
   mkdir -p "$PID_DIR" "$LOG_DIR" "$ROOT_DIR/storage" "$ROOT_DIR/models" "$QDRANT_STORAGE"
+}
+
+repo_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$ROOT_DIR" "$1" ;;
+  esac
 }
 
 install_apt_packages() {
@@ -225,9 +235,13 @@ install_python_deps() {
 download_models() {
   info "Downloading LTX-2.3 and Gemma model assets..."
   "$VENV_DIR/bin/python" "$ROOT_DIR/scripts/download_ltx_assets.py" \
-    --model-dir "$ROOT_DIR/${LTX_MODEL_DIR:-models/ltx-2.3}" \
+    --model-dir "$(repo_path "${LTX_MODEL_DIR:-models/ltx-2.3}")" \
     --text-model-id "${TEXT_MODEL_ID:-google/gemma-3-12b-it-qat-q4_0-unquantized}" \
-    --text-model-dir "$ROOT_DIR/${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}"
+    --text-model-dir "$(repo_path "${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}")" \
+    --ltx-gemma-root "$(repo_path "${LTX_GEMMA_ROOT:-${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}}")" \
+    --hf-cache-dir "${HF_HOME:-$ROOT_DIR/models/.cache/huggingface}" \
+    --min-free-gb "${MODEL_MIN_FREE_GB:-120}" \
+    --max-workers "${HF_HUB_DOWNLOAD_THREADS:-4}"
 }
 
 build_gateway() {
@@ -318,10 +332,14 @@ PY
 }
 
 check_models() {
-  local ltx_dir="$ROOT_DIR/${LTX_MODEL_DIR:-models/ltx-2.3}"
-  local text_dir="$ROOT_DIR/${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}"
+  local ltx_dir
+  local text_dir
+  local gemma_dir
+  ltx_dir="$(repo_path "${LTX_MODEL_DIR:-models/ltx-2.3}")"
+  text_dir="$(repo_path "${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}")"
+  gemma_dir="$(repo_path "${LTX_GEMMA_ROOT:-${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}}")"
   [[ -f "$ltx_dir/ltx-2.3-22b-dev.safetensors" ]] || fail "Missing full LTX 22B dev checkpoint: $ltx_dir/ltx-2.3-22b-dev.safetensors"
-  [[ -f "$ltx_dir/gemma-3-12b/config.json" ]] || fail "Missing LTX Gemma root: $ltx_dir/gemma-3-12b/config.json"
+  [[ -f "$gemma_dir/config.json" ]] || fail "Missing LTX Gemma root: $gemma_dir/config.json"
   [[ -f "$text_dir/config.json" ]] || fail "Missing text model: $text_dir/config.json"
   info "Model cache OK."
 }

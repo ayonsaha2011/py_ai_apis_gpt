@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
+from dataclasses import dataclass
 from pathlib import Path
-
-from huggingface_hub import snapshot_download
 
 
 LTX_ALLOW = [
@@ -17,12 +18,77 @@ LTX_ALLOW = [
     "ltx-2.3-temporal-upscaler-x2-1.0.safetensors",
 ]
 
-
 DEFAULT_TEXT_MODEL_ID = "google/gemma-3-12b-it-qat-q4_0-unquantized"
+BYTES_PER_GB = 1024**3
+
+
+@dataclass(frozen=True)
+class DownloadSpec:
+    label: str
+    repo_id: str
+    local_dir: Path
+    allow_patterns: list[str] | None = None
+
+
+def resolve_path(value: str | Path) -> Path:
+    return Path(value).expanduser().resolve()
+
+
+def configure_hf_cache(cache_dir: Path | None) -> Path | None:
+    if cache_dir is None:
+        return None
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("HF_HOME", str(cache_dir))
+    os.environ.setdefault("HF_HUB_CACHE", str(cache_dir / "hub"))
+    os.environ.setdefault("HF_XET_CACHE", str(cache_dir / "xet"))
+    return Path(os.environ["HF_HUB_CACHE"]).expanduser().resolve()
+
+
+def check_free_space(paths: list[Path], required_gb: float) -> None:
+    if required_gb <= 0:
+        return
+    checked: set[Path] = set()
+    for path in paths:
+        path.mkdir(parents=True, exist_ok=True)
+        usage = shutil.disk_usage(path)
+        free_gb = usage.free / BYTES_PER_GB
+        anchor = path.anchor
+        key = Path(anchor) if anchor else path
+        if key in checked:
+            continue
+        checked.add(key)
+        if free_gb < required_gb:
+            raise SystemExit(
+                f"Not enough free disk for model downloads at {path}: "
+                f"{free_gb:.1f} GiB free, require at least {required_gb:.1f} GiB. "
+                "Move MODEL_DIR/TEXT_MODEL_DIR/HF_HOME to a larger volume or pass --min-free-gb 0 to override."
+            )
+
+
+def add_unique(specs: list[DownloadSpec], spec: DownloadSpec) -> None:
+    for existing in specs:
+        if existing.repo_id == spec.repo_id and existing.local_dir == spec.local_dir:
+            print(f"Reusing {existing.local_dir} for {spec.label}; already scheduled as {existing.label}.")
+            return
+    specs.append(spec)
+
+
+def download_snapshot(spec: DownloadSpec, cache_dir: Path | None, max_workers: int) -> None:
+    from huggingface_hub import snapshot_download
+
+    spec.local_dir.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading {spec.label}: {spec.repo_id} -> {spec.local_dir}")
+    snapshot_download(
+        spec.repo_id,
+        local_dir=spec.local_dir,
+        allow_patterns=spec.allow_patterns,
+        cache_dir=cache_dir,
+        max_workers=max_workers,
+    )
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Download pinned LTX-2.3 and text model assets into the local model cache.")
+    parser = argparse.ArgumentParser(description="Download pinned LTX-2.3 and Gemma assets into the model cache.")
     parser.add_argument("--model-dir", default="models/ltx-2.3", help="LTX_MODEL_DIR")
     parser.add_argument("--text-model-id", default=DEFAULT_TEXT_MODEL_ID, help="TEXT_MODEL_ID")
     parser.add_argument(
@@ -30,24 +96,43 @@ def main() -> None:
         default="models/text/gemma-3-12b-it-qat-q4_0-unquantized",
         help="TEXT_MODEL_DIR",
     )
+    parser.add_argument(
+        "--ltx-gemma-root",
+        default=None,
+        help="LTX_GEMMA_ROOT. Defaults to <model-dir>/gemma-3-12b unless set; point it at TEXT_MODEL_DIR to avoid duplicates.",
+    )
+    parser.add_argument("--hf-cache-dir", default=os.environ.get("HF_HOME"), help="HF_HOME/HF cache root on a large volume.")
+    parser.add_argument("--min-free-gb", type=float, default=float(os.environ.get("MODEL_MIN_FREE_GB", "120")))
+    parser.add_argument("--max-workers", type=int, default=int(os.environ.get("HF_HUB_DOWNLOAD_THREADS", "4")))
     parser.add_argument("--skip-gemma", action="store_true")
     parser.add_argument("--skip-text", action="store_true")
     args = parser.parse_args()
 
-    model_dir = Path(args.model_dir)
-    model_dir.mkdir(parents=True, exist_ok=True)
-    snapshot_download("Lightricks/LTX-2.3", local_dir=model_dir, allow_patterns=LTX_ALLOW)
+    model_dir = resolve_path(args.model_dir)
+    text_model_dir = resolve_path(args.text_model_dir)
+    ltx_gemma_root = resolve_path(args.ltx_gemma_root) if args.ltx_gemma_root else model_dir / "gemma-3-12b"
+    hf_cache = configure_hf_cache(resolve_path(args.hf_cache_dir) if args.hf_cache_dir else None)
+
+    specs: list[DownloadSpec] = []
+    add_unique(specs, DownloadSpec("LTX-2.3 checkpoints", "Lightricks/LTX-2.3", model_dir, LTX_ALLOW))
     if not args.skip_gemma:
-        snapshot_download(
-            args.text_model_id,
-            local_dir=model_dir / "gemma-3-12b",
-        )
+        add_unique(specs, DownloadSpec("LTX Gemma text encoder", args.text_model_id, ltx_gemma_root))
     if not args.skip_text:
-        text_model_dir = Path(args.text_model_dir)
-        text_model_dir.mkdir(parents=True, exist_ok=True)
-        snapshot_download(args.text_model_id, local_dir=text_model_dir)
-        print(f"Text model assets ready in {text_model_dir.resolve()}")
-    print(f"LTX assets ready in {model_dir.resolve()}")
+        add_unique(specs, DownloadSpec("text worker model", args.text_model_id, text_model_dir))
+
+    free_space_paths = [spec.local_dir for spec in specs]
+    if hf_cache is not None:
+        free_space_paths.append(hf_cache)
+    check_free_space(free_space_paths, args.min_free_gb)
+
+    for spec in specs:
+        download_snapshot(spec, hf_cache, args.max_workers)
+
+    print(f"LTX assets ready in {model_dir}")
+    if not args.skip_text:
+        print(f"Text model assets ready in {text_model_dir}")
+    if not args.skip_gemma:
+        print(f"LTX Gemma assets ready in {ltx_gemma_root}")
 
 
 if __name__ == "__main__":

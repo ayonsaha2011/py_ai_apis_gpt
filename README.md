@@ -22,7 +22,7 @@ Production-oriented multi-model inference stack with a Rust gateway, custom PyTo
 python scripts\download_ltx_assets.py --model-dir models\ltx-2.3
 ```
 
-The default text model is `google/gemma-3-12b-it-qat-q4_0-unquantized`, cached at `TEXT_MODEL_DIR=models/text/gemma-3-12b-it-qat-q4_0-unquantized`. The LTX worker also keeps a Gemma copy under `LTX_MODEL_DIR/gemma-3-12b` for prompt conditioning.
+The default text model is `google/gemma-3-12b-it-qat-q4_0-unquantized`, cached at `TEXT_MODEL_DIR=models/text/gemma-3-12b-it-qat-q4_0-unquantized`. Point `LTX_GEMMA_ROOT` at the same directory to avoid storing a second 24GB Gemma copy for LTX prompt conditioning.
 
 4. Start services in separate terminals:
 

@@ -1,13 +1,16 @@
 import {
   Activity,
+  Clapperboard,
   CheckCircle2,
   Clock3,
   Database,
   History,
+  Image as ImageIcon,
   KeyRound,
   Loader2,
   LogOut,
   MessageSquare,
+  Music2,
   Play,
   RefreshCw,
   RotateCw,
@@ -15,13 +18,17 @@ import {
   Server,
   Settings,
   Shield,
+  SlidersHorizontal,
+  Sparkles,
   Square,
   Trash2,
   Upload,
+  UserPlus,
   Video,
+  Wand2,
 } from "lucide-react";
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from "react";
-import { Link, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 const defaultModel = "google/gemma-3-12b-it-qat-q4_0-unquantized";
 const videoModes = [
@@ -33,6 +40,121 @@ const videoModes = [
   "retake",
   "distilled",
   "hdr",
+] as const;
+
+type VideoMode = (typeof videoModes)[number];
+
+const modeLabels: Record<VideoMode, string> = {
+  text_to_video: "Text to video",
+  image_to_video: "Image to video",
+  video_to_video: "Video to video",
+  audio_to_video: "Audio to video",
+  keyframe_interpolation: "Keyframes",
+  retake: "Retake",
+  distilled: "Fast distilled",
+  hdr: "HDR",
+};
+
+const resolutionPresets = [
+  { label: "SD wide", width: "768", height: "448" },
+  { label: "HD wide", width: "1024", height: "576" },
+  { label: "Square", width: "768", height: "768" },
+  { label: "Portrait", width: "576", height: "1024" },
+];
+
+const durationOptions = [
+  { label: "5 seconds", value: "5", frames: "121" },
+  { label: "10 seconds", value: "10", frames: "241" },
+  { label: "15 seconds", value: "15", frames: "361" },
+  { label: "20 seconds", value: "20", frames: "481" },
+] as const;
+
+type VideoExample = {
+  title: string;
+  mode: VideoMode;
+  prompt: string;
+  negative: string;
+  width: string;
+  height: string;
+  duration: string;
+  frames: string;
+  steps: string;
+  cfg: string;
+};
+
+type VideoForm = {
+  mode: VideoMode;
+  width: string;
+  height: string;
+  duration: string;
+  frames: string;
+  steps: string;
+  cfg: string;
+  seedHint: string;
+  enhancePrompt: boolean;
+  imageUrl: string;
+  videoUrl: string;
+  audioUrl: string;
+  keyframes: string;
+  retakeStart: string;
+  retakeEnd: string;
+  prompt: string;
+  negative: string;
+};
+
+const videoExamples: VideoExample[] = [
+  {
+    title: "Product macro",
+    mode: "text_to_video",
+    width: "1024",
+    height: "576",
+    duration: "5",
+    frames: "121",
+    steps: "40",
+    cfg: "7.5",
+    prompt:
+      "A cinematic macro product shot of a matte black wireless headphone rotating slowly on polished graphite, soft studio reflections, shallow depth of field, controlled dolly-in camera movement, premium commercial lighting.",
+    negative: "low quality, blurry, warped geometry, unreadable text, flicker, jitter, noisy shadows",
+  },
+  {
+    title: "Character moment",
+    mode: "text_to_video",
+    width: "768",
+    height: "1024",
+    duration: "5",
+    frames: "121",
+    steps: "40",
+    cfg: "7.0",
+    prompt:
+      "A young astronaut standing inside a greenhouse on Mars, orange dust drifting outside the glass, plants moving gently from the ventilation, subtle handheld camera, realistic suit fabric, warm practical lights.",
+    negative: "cartoon, plastic skin, extra fingers, distorted helmet, fast camera, harsh flicker",
+  },
+  {
+    title: "City motion",
+    mode: "distilled",
+    width: "1024",
+    height: "576",
+    duration: "10",
+    frames: "241",
+    steps: "30",
+    cfg: "6.5",
+    prompt:
+      "A late-night aerial shot flying between rain-slick skyscrapers in Tokyo, neon signs reflected on glass, traffic trails below, smooth forward motion, realistic atmosphere, cinematic contrast.",
+    negative: "overexposed neon, unstable camera, smeared buildings, low detail, text artifacts",
+  },
+  {
+    title: "Nature detail",
+    mode: "text_to_video",
+    width: "768",
+    height: "448",
+    duration: "5",
+    frames: "121",
+    steps: "36",
+    cfg: "7.0",
+    prompt:
+      "A close shot of dew drops sliding across a green leaf after sunrise, tiny insects moving in the background, soft golden light, macro lens, slow lateral camera movement, realistic bokeh.",
+    negative: "blur, oversaturated colors, artificial leaf texture, frame jumps, noisy background",
+  },
 ];
 
 type Config = {
@@ -110,6 +232,10 @@ function errorMessage(value: unknown): string {
 
 function formatDate(ts?: number) {
   return ts ? new Date(ts * 1000).toLocaleString() : "";
+}
+
+function framesForDuration(duration: string) {
+  return durationOptions.find((option) => option.value === duration)?.frames || "121";
 }
 
 function App() {
@@ -196,7 +322,7 @@ function App() {
         body: JSON.stringify({ email, password }),
       });
       setConfig((current) => ({ ...current, token: data.access_token }));
-      notify("Signed in");
+      notify(mode === "register" ? "Account created" : "Signed in");
     } finally {
       setBusy(false);
     }
@@ -218,9 +344,10 @@ function App() {
         <Sidebar config={config} health={health} onConfig={setConfig} />
         <main className="grid content-start gap-5 p-4 sm:p-6">
           <Topbar title={title} user={user} busy={busy} onRefresh={refreshMe} onLogout={logout} />
-          <AuthPanel busy={busy} onAuth={(mode, email, password) => auth(mode, email, password).catch((err) => notify(errorMessage(err)))} />
           <Routes>
             <Route path="/" element={<Navigate to="/chat" replace />} />
+            <Route path="/login" element={<AuthPage mode="login" busy={busy} notify={notify} onAuth={(email, password) => auth("login", email, password)} />} />
+            <Route path="/register" element={<AuthPage mode="register" busy={busy} notify={notify} onAuth={(email, password) => auth("register", email, password)} />} />
             <Route path="/chat" element={<ChatPage request={request} apiBase={apiBase} token={config.token} notify={notify} />} />
             <Route path="/video" element={<VideoPage request={request} apiBase={apiBase} token={config.token} notify={notify} />} />
             <Route path="/rag" element={<RagPage request={request} notify={notify} />} />
@@ -264,6 +391,12 @@ function Sidebar({
         </div>
 
         <nav className="grid gap-1" aria-label="Primary">
+          <NavItem to="/login" icon={<KeyRound size={18} />} active={location.pathname.startsWith("/login")}>
+            Login
+          </NavItem>
+          <NavItem to="/register" icon={<UserPlus size={18} />} active={location.pathname.startsWith("/register")}>
+            Register
+          </NavItem>
           <NavItem to="/chat" icon={<MessageSquare size={18} />} active={location.pathname.startsWith("/chat")}>
             Chat
           </NavItem>
@@ -352,43 +485,87 @@ function Topbar({
           <RefreshCw size={16} className={busy ? "animate-spin" : ""} />
           Reload
         </button>
-        <button className="btn" type="button" onClick={onLogout}>
-          <LogOut size={16} />
-          Logout
-        </button>
+        {user ? (
+          <button className="btn" type="button" onClick={onLogout}>
+            <LogOut size={16} />
+            Logout
+          </button>
+        ) : (
+          <>
+            <Link className="btn" to="/login">
+              <KeyRound size={16} />
+              Login
+            </Link>
+            <Link className="btn btn-primary" to="/register">
+              <UserPlus size={16} />
+              Register
+            </Link>
+          </>
+        )}
       </div>
     </header>
   );
 }
 
-function AuthPanel({
+function AuthPage({
+  mode,
   busy,
+  notify,
   onAuth,
 }: {
+  mode: "login" | "register";
   busy: boolean;
-  onAuth: (mode: "login" | "register", email: string, password: string) => void;
+  notify: (message: string) => void;
+  onAuth: (email: string, password: string) => Promise<void>;
 }) {
+  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
+  const isRegister = mode === "register";
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    try {
+      await onAuth(email.trim(), password);
+      navigate("/chat");
+    } catch (err) {
+      notify(errorMessage(err));
+    }
+  }
 
   return (
-    <section className="surface">
-      <form className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]" onSubmit={(event) => event.preventDefault()}>
-        <label className="field">
-          Email
-          <input className="input" autoComplete="email" value={email} onChange={(event) => setEmail(event.target.value)} />
-        </label>
-        <label className="field">
-          Password
-          <input className="input" type="password" autoComplete="current-password" value={password} onChange={(event) => setPassword(event.target.value)} />
-        </label>
-        <button className="btn btn-primary self-end" type="button" disabled={busy} onClick={() => onAuth("login", email.trim(), password)}>
-          <KeyRound size={16} />
-          Login
+    <section className="grid min-h-[62vh] place-items-center">
+      <form className="surface grid w-full max-w-[520px] gap-5" onSubmit={submit}>
+        <div>
+          <div className="grid h-12 w-12 place-items-center rounded-lg bg-ocean text-white">
+            {isRegister ? <UserPlus size={22} /> : <KeyRound size={22} />}
+          </div>
+          <h2 className="mt-4 text-2xl font-semibold text-ink">{isRegister ? "Create account" : "Login"}</h2>
+          <p className="mt-1 text-sm text-muted">{isRegister ? "Create a gateway account for chat, RAG, video history, and artifacts." : "Use your gateway account to continue."}</p>
+        </div>
+
+        <div className="grid gap-3">
+          <label className="field">
+            Email
+            <input className="input" autoComplete="email" required type="email" value={email} onChange={(event) => setEmail(event.target.value)} />
+          </label>
+          <label className="field">
+            Password
+            <input className="input" autoComplete={isRegister ? "new-password" : "current-password"} required minLength={8} type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+          </label>
+        </div>
+
+        <button className="btn btn-primary w-full" type="submit" disabled={busy}>
+          {busy ? <Loader2 size={16} className="animate-spin" /> : isRegister ? <UserPlus size={16} /> : <KeyRound size={16} />}
+          {isRegister ? "Create account" : "Login"}
         </button>
-        <button className="btn self-end" type="button" disabled={busy} onClick={() => onAuth("register", email.trim(), password)}>
-          Register
-        </button>
+
+        <div className="text-center text-sm text-muted">
+          {isRegister ? "Already have an account?" : "Need an account?"}{" "}
+          <Link className="font-semibold text-ocean" to={isRegister ? "/login" : "/register"}>
+            {isRegister ? "Login" : "Register"}
+          </Link>
+        </div>
       </form>
     </section>
   );
@@ -542,13 +719,16 @@ function VideoPage({
   token: string;
   notify: (message: string) => void;
 }) {
-  const [form, setForm] = useState({
+  const [form, setForm] = useState<VideoForm>({
     mode: "text_to_video",
     width: "1024",
     height: "576",
-    frames: "97",
+    duration: "5",
+    frames: "121",
     steps: "40",
     cfg: "7.5",
+    seedHint: "",
+    enhancePrompt: false,
     imageUrl: "",
     videoUrl: "",
     audioUrl: "",
@@ -565,8 +745,58 @@ function VideoPage({
 
   useEffect(() => localStorage.setItem("videoJobs", JSON.stringify(jobs.slice(0, 50))), [jobs]);
 
-  function patch(key: keyof typeof form, value: string) {
+  const mediaRequirements = videoRequirements(form.mode);
+  const frameValid = /^\d+$/.test(form.frames) && (Number(form.frames) - 1) % 8 === 0;
+  const sizeValid = Number(form.width) % 32 === 0 && Number(form.height) % 32 === 0;
+
+  function patch<K extends keyof VideoForm>(key: K, value: VideoForm[K]) {
     setForm((current) => ({ ...current, [key]: value }));
+  }
+
+  function applyPreset(preset: (typeof resolutionPresets)[number]) {
+    setForm((current) => ({ ...current, width: preset.width, height: preset.height }));
+  }
+
+  function setDuration(duration: string) {
+    setForm((current) => ({ ...current, duration, frames: framesForDuration(duration) }));
+  }
+
+  function applyExample(example: VideoExample) {
+    setForm((current) => ({
+      ...current,
+      mode: example.mode,
+      width: example.width,
+      height: example.height,
+      duration: example.duration,
+      frames: example.frames,
+      steps: example.steps,
+      cfg: example.cfg,
+      prompt: example.prompt,
+      negative: example.negative,
+    }));
+    notify(`Loaded ${example.title}`);
+  }
+
+  function resetForm() {
+    setForm({
+      mode: "text_to_video",
+      width: "1024",
+      height: "576",
+      duration: "5",
+      frames: "121",
+      steps: "40",
+      cfg: "7.5",
+      seedHint: "",
+      enhancePrompt: false,
+      imageUrl: "",
+      videoUrl: "",
+      audioUrl: "",
+      keyframes: "",
+      retakeStart: "",
+      retakeEnd: "",
+      prompt: "",
+      negative: "",
+    });
   }
 
   async function submit(event: FormEvent) {
@@ -580,7 +810,9 @@ function VideoPage({
       num_frames: Number(form.frames),
       num_inference_steps: Number(form.steps),
       guidance_scale: Number(form.cfg),
+      enhance_prompt: form.enhancePrompt,
     };
+    if (form.seedHint) payload.seed_hint = Number(form.seedHint);
     if (form.imageUrl) payload.image_url = form.imageUrl;
     if (form.videoUrl) payload.video_url = form.videoUrl;
     if (form.audioUrl) payload.audio_url = form.audioUrl;
@@ -623,51 +855,149 @@ function VideoPage({
   }
 
   return (
-    <section className="grid gap-4">
-      <div className="surface">
-        <form className="grid gap-3" onSubmit={submit}>
-          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
-            <label className="field">
-              Mode
-              <select className="input" value={form.mode} onChange={(event) => patch("mode", event.target.value)}>
-                {videoModes.map((mode) => (
-                  <option key={mode} value={mode}>
-                    {mode}
-                  </option>
+    <section className="grid gap-5">
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
+        <div className="surface grid gap-5">
+          <div className="flex flex-col gap-3 border-b border-line pb-4 sm:flex-row sm:items-start sm:justify-between">
+            <div>
+              <div className="flex items-center gap-2 text-lg font-semibold text-ink">
+                <Clapperboard size={20} />
+                Video job
+              </div>
+              <p className="mt-1 text-sm text-muted">Unique queued generations with gateway validation and SSE progress.</p>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <QualityPill ok={sizeValid} label="32px grid" />
+              <QualityPill ok={frameValid} label="8k+1 frames" />
+            </div>
+          </div>
+
+          <form className="grid gap-5" onSubmit={submit}>
+            <div className="grid gap-4">
+              <div className="grid gap-2">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="text-sm font-semibold text-muted">Mode</span>
+                  <span className="text-sm font-semibold text-ocean">{modeLabels[form.mode]}</span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+                  {videoModes.map((mode) => (
+                    <button
+                      className={`min-h-11 rounded-md border px-3 text-sm font-semibold transition ${
+                        form.mode === mode ? "border-ocean bg-ocean text-white shadow-panel" : "border-line bg-white text-ink hover:border-ocean hover:text-ocean"
+                      }`}
+                      key={mode}
+                      type="button"
+                      onClick={() => patch("mode", mode)}
+                    >
+                      {modeLabels[mode]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {resolutionPresets.map((preset) => (
+                  <button className="btn min-h-10 px-2 text-xs" key={preset.label} type="button" onClick={() => applyPreset(preset)}>
+                    {preset.label}
+                  </button>
                 ))}
-              </select>
+              </div>
+            </div>
+
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-6">
+              <NumberField label="Width" value={form.width} step={32} onChange={(value) => patch("width", value)} />
+              <NumberField label="Height" value={form.height} step={32} onChange={(value) => patch("height", value)} />
+              <label className="field">
+                Duration
+                <select className="input" value={form.duration} onChange={(event) => setDuration(event.target.value)}>
+                  {durationOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <NumberField label="Steps" value={form.steps} step={1} onChange={(value) => patch("steps", value)} />
+              <NumberField label="CFG" value={form.cfg} step={0.1} onChange={(value) => patch("cfg", value)} />
+              <NumberField label="Seed hint" value={form.seedHint} step={1} onChange={(value) => patch("seedHint", value)} />
+            </div>
+
+            <div className="rounded-lg border border-line bg-slate-50 p-3">
+              <div className="mb-3 flex items-center gap-2 text-sm font-semibold text-ink">
+                <Upload size={16} />
+                Inputs for {modeLabels[form.mode]}
+              </div>
+              <div className="grid gap-3 lg:grid-cols-3">
+                {mediaRequirements.image ? <TextField label="Image URL" value={form.imageUrl} onChange={(value) => patch("imageUrl", value)} /> : null}
+                {mediaRequirements.video ? <TextField label="Video URL" value={form.videoUrl} onChange={(value) => patch("videoUrl", value)} /> : null}
+                {mediaRequirements.audio ? <TextField label="Audio URL" value={form.audioUrl} onChange={(value) => patch("audioUrl", value)} /> : null}
+                {mediaRequirements.keyframes ? <TextField label="Keyframe URLs" value={form.keyframes} onChange={(value) => patch("keyframes", value)} /> : null}
+                {mediaRequirements.retake ? <NumberField label="Retake start" value={form.retakeStart} step={0.1} onChange={(value) => patch("retakeStart", value)} /> : null}
+                {mediaRequirements.retake ? <NumberField label="Retake end" value={form.retakeEnd} step={0.1} onChange={(value) => patch("retakeEnd", value)} /> : null}
+                {!Object.values(mediaRequirements).some(Boolean) ? <div className="rounded-md border border-dashed border-line bg-white p-3 text-sm text-muted">No media URL required for this mode.</div> : null}
+              </div>
+            </div>
+
+            <label className="field">
+              Prompt
+              <textarea className="textarea min-h-36 text-base leading-7" value={form.prompt} onChange={(event) => patch("prompt", event.target.value)} />
             </label>
-            <NumberField label="Width" value={form.width} step={32} onChange={(value) => patch("width", value)} />
-            <NumberField label="Height" value={form.height} step={32} onChange={(value) => patch("height", value)} />
-            <NumberField label="Frames" value={form.frames} step={8} onChange={(value) => patch("frames", value)} />
-            <NumberField label="Steps" value={form.steps} step={1} onChange={(value) => patch("steps", value)} />
-            <NumberField label="CFG" value={form.cfg} step={0.1} onChange={(value) => patch("cfg", value)} />
+            <label className="field">
+              Negative prompt
+              <textarea className="textarea min-h-20" value={form.negative} onChange={(event) => patch("negative", event.target.value)} />
+            </label>
+
+            <div className="flex flex-col gap-3 border-t border-line pt-4 sm:flex-row sm:items-center sm:justify-between">
+              <Toggle label="Enhance prompt" checked={form.enhancePrompt} onChange={(checked) => patch("enhancePrompt", checked)} />
+              <div className="flex flex-wrap gap-2">
+                <button className="btn" type="button" onClick={resetForm}>
+                  <Trash2 size={16} />
+                  Reset
+                </button>
+                <button className="btn btn-primary" type="submit">
+                  <Play size={16} />
+                  Queue video
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+
+        <aside className="grid content-start gap-4">
+          <div className="surface grid gap-3">
+            <div className="flex items-center gap-2">
+              <Sparkles size={18} />
+              <h2 className="section-title">Example prompts</h2>
+            </div>
+            <div className="grid gap-2">
+              {videoExamples.map((example) => (
+                <button className="text-left" key={example.title} type="button" onClick={() => applyExample(example)}>
+                  <div className="rounded-lg border border-line bg-white p-3 transition hover:border-ocean hover:shadow-panel">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-semibold text-ink">{example.title}</div>
+                      <Wand2 size={16} className="text-ocean" />
+                    </div>
+                    <div className="mt-1 text-xs font-semibold text-muted">{modeLabels[example.mode]} - {example.width}x{example.height} - {example.duration}s</div>
+                    <p className="mt-2 line-clamp-3 text-sm leading-5 text-muted">{example.prompt}</p>
+                  </div>
+                </button>
+              ))}
+            </div>
           </div>
-          <div className="grid gap-3 lg:grid-cols-3">
-            <TextField label="Image URL" value={form.imageUrl} onChange={(value) => patch("imageUrl", value)} />
-            <TextField label="Video URL" value={form.videoUrl} onChange={(value) => patch("videoUrl", value)} />
-            <TextField label="Audio URL" value={form.audioUrl} onChange={(value) => patch("audioUrl", value)} />
+
+          <div className="surface grid gap-3">
+            <div className="flex items-center gap-2">
+              <SlidersHorizontal size={18} />
+              <h2 className="section-title">Current setup</h2>
+            </div>
+            <div className="grid gap-2 text-sm">
+              <SetupRow icon={<Video size={15} />} label="Mode" value={modeLabels[form.mode]} />
+              <SetupRow icon={<ImageIcon size={15} />} label="Canvas" value={`${form.width}x${form.height}`} />
+              <SetupRow icon={<Clock3 size={15} />} label="Duration" value={`${form.duration}s`} />
+              <SetupRow icon={<Clapperboard size={15} />} label="Frames" value={form.frames} />
+              <SetupRow icon={<Music2 size={15} />} label="Media" value={inputSummary(mediaRequirements)} />
+            </div>
           </div>
-          <div className="grid gap-3 lg:grid-cols-3">
-            <TextField label="Keyframes" value={form.keyframes} onChange={(value) => patch("keyframes", value)} />
-            <NumberField label="Retake Start" value={form.retakeStart} step={0.1} onChange={(value) => patch("retakeStart", value)} />
-            <NumberField label="Retake End" value={form.retakeEnd} step={0.1} onChange={(value) => patch("retakeEnd", value)} />
-          </div>
-          <label className="field">
-            Prompt
-            <textarea className="textarea" value={form.prompt} onChange={(event) => patch("prompt", event.target.value)} />
-          </label>
-          <label className="field">
-            Negative
-            <textarea className="textarea min-h-16" value={form.negative} onChange={(event) => patch("negative", event.target.value)} />
-          </label>
-          <div>
-            <button className="btn btn-primary" type="submit">
-              <Play size={16} />
-              Queue Video
-            </button>
-          </div>
-        </form>
+        </aside>
       </div>
 
       <div className="grid gap-3">
@@ -684,7 +1014,7 @@ function VideoPage({
                   <div className="break-all text-sm font-semibold">{job.job_id}</div>
                   <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
                     <Clock3 size={14} />
-                    <span>{job.status}</span>
+                    <StatusBadge status={job.status} />
                     <span>{Math.round((job.progress || 0) * 100)}%</span>
                     <span>{formatDate(job.updated_at || job.created_at)}</span>
                   </div>
@@ -715,6 +1045,60 @@ function VideoPage({
       </div>
     </section>
   );
+}
+
+function videoRequirements(mode: VideoMode) {
+  return {
+    image: mode === "image_to_video" || mode === "audio_to_video",
+    video: mode === "video_to_video" || mode === "retake" || mode === "hdr",
+    audio: mode === "audio_to_video",
+    keyframes: mode === "keyframe_interpolation",
+    retake: mode === "retake",
+  };
+}
+
+function inputSummary(requirements: ReturnType<typeof videoRequirements>) {
+  const items = [
+    requirements.image ? "image" : "",
+    requirements.video ? "video" : "",
+    requirements.audio ? "audio" : "",
+    requirements.keyframes ? "keyframes" : "",
+    requirements.retake ? "time range" : "",
+  ].filter(Boolean);
+  return items.length ? items.join(", ") : "prompt only";
+}
+
+function QualityPill({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <span className={`inline-flex min-h-8 items-center gap-1.5 rounded-md border px-2.5 text-xs font-bold ${ok ? "border-emerald-200 bg-emerald-50 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
+      {ok ? <CheckCircle2 size={14} /> : <Clock3 size={14} />}
+      {label}
+    </span>
+  );
+}
+
+function SetupRow({ icon, label, value }: { icon: ReactNode; label: string; value: string }) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border border-line bg-slate-50 px-3 py-2">
+      <div className="flex items-center gap-2 text-muted">
+        {icon}
+        <span>{label}</span>
+      </div>
+      <span className="truncate font-semibold text-ink">{value}</span>
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
+  const normalized = status.toLowerCase();
+  const style = normalized === "complete"
+    ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+    : normalized === "failed"
+      ? "border-red-200 bg-red-50 text-red-700"
+      : normalized === "cancelled"
+        ? "border-slate-200 bg-slate-100 text-slate-600"
+        : "border-blue-200 bg-blue-50 text-blue-700";
+  return <span className={`rounded-md border px-2 py-0.5 font-bold ${style}`}>{status}</span>;
 }
 
 async function watchVideoJob(apiBase: string, token: string, jobId: string, onUpdate: (job: VideoJob) => void) {
@@ -1025,6 +1409,8 @@ function Toast({ message }: { message: string }) {
 }
 
 function titleFor(path: string) {
+  if (path.startsWith("/login")) return "Login";
+  if (path.startsWith("/register")) return "Register";
   if (path.startsWith("/video")) return "Video";
   if (path.startsWith("/rag")) return "RAG";
   if (path.startsWith("/history")) return "History";

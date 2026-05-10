@@ -42,6 +42,9 @@ load_env() {
   export FRONTEND_DIR="${FRONTEND_DIR:-frontend/dist}"
   export TEXT_WORKER_URL="${TEXT_WORKER_URL:-http://127.0.0.1:8101}"
   export LTX_WORKER_URL="${LTX_WORKER_URL:-http://127.0.0.1:8102}"
+  export TEXT_MODEL_DIR="${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}"
+  export LTX_MODEL_DIR="${LTX_MODEL_DIR:-models/ltx-2.3}"
+  export LTX_GEMMA_ROOT="${LTX_GEMMA_ROOT:-$TEXT_MODEL_DIR}"
   export LTX_CUDA_DEVICE="${LTX_CUDA_DEVICE:-cuda:0}"
   export LTX_QUANTIZATION="${LTX_QUANTIZATION:-none}"
   export QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:6333}"
@@ -54,6 +57,13 @@ load_env() {
 
 ensure_dirs() {
   mkdir -p "$PID_DIR" "$LOG_DIR" "$ROOT_DIR/storage" "$ROOT_DIR/models"
+}
+
+repo_path() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s/%s\n' "$ROOT_DIR" "$1" ;;
+  esac
 }
 
 require_secret() {
@@ -122,17 +132,21 @@ PY
 }
 
 check_models() {
-  local ltx_dir="${LTX_MODEL_DIR:-models/ltx-2.3}"
-  local text_dir="${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}"
-  [[ -f "$ROOT_DIR/$ltx_dir/ltx-2.3-22b-dev.safetensors" || -f "$ltx_dir/ltx-2.3-22b-dev.safetensors" ]] || {
+  local ltx_dir
+  local text_dir
+  local gemma_dir
+  ltx_dir="$(repo_path "${LTX_MODEL_DIR:-models/ltx-2.3}")"
+  text_dir="$(repo_path "${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}")"
+  gemma_dir="$(repo_path "${LTX_GEMMA_ROOT:-${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}}")"
+  [[ -f "$ltx_dir/ltx-2.3-22b-dev.safetensors" ]] || {
     echo "Missing full LTX 22B dev checkpoint in $ltx_dir" >&2
     exit 1
   }
-  [[ -f "$ROOT_DIR/$ltx_dir/gemma-3-12b/config.json" || -f "$ltx_dir/gemma-3-12b/config.json" ]] || {
-    echo "Missing LTX Gemma assets in $ltx_dir/gemma-3-12b" >&2
+  [[ -f "$gemma_dir/config.json" ]] || {
+    echo "Missing LTX Gemma assets in $gemma_dir" >&2
     exit 1
   }
-  [[ -f "$ROOT_DIR/$text_dir/config.json" || -f "$text_dir/config.json" ]] || {
+  [[ -f "$text_dir/config.json" ]] || {
     echo "Missing text model config in $text_dir" >&2
     exit 1
   }
