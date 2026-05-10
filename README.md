@@ -70,3 +70,5 @@ For Ubuntu 24.04 H200 servers, use:
 - `scripts/deploy_h200.sh`
 
 The profiles are separate. H100 defaults to `GATEWAY_PROFILE=cloud_h100`, `.env.h100`, `.venv-h100`, and `runtime/h100`. H200 defaults to `GATEWAY_PROFILE=cloud_h200`, `.env.h200`, `.venv-h200`, and `runtime/h200`.
+
+The first registered user is promoted to `admin` automatically. Additional bootstrap admins can be configured with `ADMIN_EMAILS=email1@example.com,email2@example.com` before registration.

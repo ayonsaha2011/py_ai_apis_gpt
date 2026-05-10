@@ -39,6 +39,50 @@ impl Db {
         self.conn
             .execute_batch(include_str!("../migrations/001_init.sql"))
             .await?;
+        self.ensure_user_role_column().await?;
+        self.ensure_bootstrap_admin().await?;
+        Ok(())
+    }
+
+    async fn ensure_user_role_column(&self) -> anyhow::Result<()> {
+        let mut rows = self.conn.query("PRAGMA table_info(users)", ()).await?;
+        let mut has_role = false;
+        while let Some(row) = rows.next().await? {
+            let name: String = row.get(1)?;
+            if name == "role" {
+                has_role = true;
+                break;
+            }
+        }
+        if !has_role {
+            self.conn
+                .execute(
+                    "ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'",
+                    (),
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn ensure_bootstrap_admin(&self) -> anyhow::Result<()> {
+        let mut rows = self
+            .conn
+            .query("SELECT COUNT(*) FROM users WHERE role = 'admin'", ())
+            .await?;
+        let admin_count = if let Some(row) = rows.next().await? {
+            row.get::<i64>(0)?
+        } else {
+            0
+        };
+        if admin_count == 0 {
+            self.conn
+                .execute(
+                    "UPDATE users SET role = 'admin' WHERE id = (SELECT id FROM users ORDER BY created_at ASC LIMIT 1)",
+                    (),
+                )
+                .await?;
+        }
         Ok(())
     }
 
@@ -55,19 +99,35 @@ impl Db {
         Ok(())
     }
 
-    pub async fn create_user(&self, email: &str, password_hash: &str) -> anyhow::Result<User> {
+    pub async fn user_count(&self) -> anyhow::Result<i64> {
+        let mut rows = self.conn.query("SELECT COUNT(*) FROM users", ()).await?;
+        Ok(if let Some(row) = rows.next().await? {
+            row.get(0)?
+        } else {
+            0
+        })
+    }
+
+    pub async fn create_user(
+        &self,
+        email: &str,
+        password_hash: &str,
+        role: &str,
+    ) -> anyhow::Result<User> {
         let user = User {
             id: Uuid::now_v7().to_string(),
             email: email.to_owned(),
+            role: role.to_owned(),
             created_at: now_ts(),
         };
         self.conn
             .execute(
-                "INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+                "INSERT INTO users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)",
                 params![
                     user.id.clone(),
                     user.email.clone(),
                     password_hash,
+                    user.role.clone(),
                     user.created_at
                 ],
             )
@@ -79,7 +139,7 @@ impl Db {
         let mut rows = self
             .conn
             .query(
-                "SELECT id, email, password_hash, created_at FROM users WHERE email = ?",
+                "SELECT id, email, password_hash, role, created_at FROM users WHERE email = ?",
                 params![email],
             )
             .await?;
@@ -87,7 +147,8 @@ impl Db {
             let user = User {
                 id: row.get(0)?,
                 email: row.get(1)?,
-                created_at: row.get(3)?,
+                role: row.get(3)?,
+                created_at: row.get(4)?,
             };
             let hash: String = row.get(2)?;
             Ok(Some((user, hash)))
@@ -100,7 +161,7 @@ impl Db {
         let mut rows = self
             .conn
             .query(
-                "SELECT id, email, created_at FROM users WHERE id = ?",
+                "SELECT id, email, role, created_at FROM users WHERE id = ?",
                 params![id],
             )
             .await?;
@@ -108,7 +169,8 @@ impl Db {
             Ok(Some(User {
                 id: row.get(0)?,
                 email: row.get(1)?,
-                created_at: row.get(2)?,
+                role: row.get(2)?,
+                created_at: row.get(3)?,
             }))
         } else {
             Ok(None)
@@ -146,7 +208,7 @@ impl Db {
         let mut rows = self
             .conn
             .query(
-                "SELECT u.id, u.email, u.created_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND s.revoked_at IS NULL",
+                "SELECT u.id, u.email, u.role, u.created_at FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token_hash = ? AND s.expires_at > ? AND s.revoked_at IS NULL",
                 params![token_hash, now_ts()],
             )
             .await?;
@@ -154,7 +216,8 @@ impl Db {
             Ok(Some(User {
                 id: row.get(0)?,
                 email: row.get(1)?,
-                created_at: row.get(2)?,
+                role: row.get(2)?,
+                created_at: row.get(3)?,
             }))
         } else {
             Ok(None)

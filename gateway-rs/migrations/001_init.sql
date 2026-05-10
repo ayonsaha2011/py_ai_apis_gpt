@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'user',
     created_at INTEGER NOT NULL
 );
 
@@ -147,4 +148,3 @@ CREATE INDEX IF NOT EXISTS idx_chat_user_session ON chat_messages(user_id, sessi
 CREATE INDEX IF NOT EXISTS idx_video_user_created ON video_jobs(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_video_status ON video_jobs(status, created_at);
 CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_events(created_at DESC);
-

@@ -76,6 +76,7 @@ load_env_if_present() {
   export GATEWAY_BIND="${GATEWAY_BIND:-0.0.0.0:8080}"
   export GATEWAY_PROFILE="${GATEWAY_PROFILE:-cloud_h100}"
   export RUNTIME_BACKEND="${RUNTIME_BACKEND:-native}"
+  export SERVICE_LOG_DIR="${SERVICE_LOG_DIR:-$LOG_DIR}"
   export LOCAL_STORAGE_DIR="${LOCAL_STORAGE_DIR:-storage}"
   export FRONTEND_DIR="${FRONTEND_DIR:-frontend/dist}"
   export TEXT_WORKER_URL="${TEXT_WORKER_URL:-http://127.0.0.1:8101}"

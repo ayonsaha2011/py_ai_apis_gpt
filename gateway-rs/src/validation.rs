@@ -10,19 +10,38 @@ pub fn validate_video_request(req: &VideoJobRequest, profile: &str) -> Result<()
     if req.prompt.trim().is_empty() {
         return Err(AppError::BadRequest("prompt is required".into()));
     }
-    if req.width % 32 != 0 || req.height % 32 != 0 {
-        return Err(AppError::BadRequest(
-            "width and height must be divisible by 32".into(),
-        ));
-    }
     if (req.num_frames - 1) % 8 != 0 {
         return Err(AppError::BadRequest("num_frames must satisfy 8k+1".into()));
     }
     let budget = ltx_budget(req, profile);
-    let max_side = budget.max_side;
+    let output_pixels = req.width as u64 * req.height as u64;
+    let pixel_frames = output_pixels * req.num_frames as u64;
+    let native_request = req.width <= budget.max_native_side
+        && req.height <= budget.max_native_side
+        && req.num_frames <= budget.max_frames
+        && pixel_frames <= budget.max_pixel_frames
+        && req.width % 32 == 0
+        && req.height % 32 == 0;
+    let upscaled_request = !native_request
+        && budget.max_output_side > budget.max_native_side
+        && req.num_frames <= budget.max_upscaled_frames;
+    if req.width % 32 != 0 || req.height % 32 != 0 {
+        if !upscaled_request || req.width % 2 != 0 || req.height % 2 != 0 {
+            return Err(AppError::BadRequest(
+                "width and height must be divisible by 32 for native generation, or even for 4K upscaled output".into(),
+            ));
+        }
+    }
+    let max_side = budget.max_output_side;
     if req.width > max_side || req.height > max_side {
         return Err(AppError::BadRequest(format!(
-            "width/height exceed profile limit {max_side}"
+            "width/height exceed 4K output limit {max_side}"
+        )));
+    }
+    if output_pixels > budget.max_output_pixels {
+        return Err(AppError::BadRequest(format!(
+            "width/height exceed 4K output pixel limit {}",
+            budget.max_output_pixels
         )));
     }
     if let Some(steps) = req.num_inference_steps {
@@ -32,18 +51,22 @@ pub fn validate_video_request(req: &VideoJobRequest, profile: &str) -> Result<()
             ));
         }
     }
-    if req.num_frames > budget.max_frames {
+    let max_frame_limit = budget.max_frames.max(budget.max_upscaled_frames);
+    if req.num_frames > max_frame_limit {
         return Err(AppError::BadRequest(format!(
             "num_frames exceeds {} for {}; {}",
-            budget.max_frames, budget.label, budget.guidance
+            max_frame_limit, budget.label, budget.guidance
         )));
     }
-    let pixel_frames = req.width as u64 * req.height as u64 * req.num_frames as u64;
-    if pixel_frames > budget.max_pixel_frames {
-        return Err(AppError::BadRequest(format!(
-            "request exceeds {} memory budget ({} pixel-frames > {}); {}",
-            budget.label, pixel_frames, budget.max_pixel_frames, budget.guidance
-        )));
+    if !native_request {
+        if req.num_frames > budget.max_upscaled_frames
+            || budget.max_output_side <= budget.max_native_side
+        {
+            return Err(AppError::BadRequest(format!(
+                "request exceeds {} memory budget ({} pixel-frames > {}); {}",
+                budget.label, pixel_frames, budget.max_pixel_frames, budget.guidance
+            )));
+        }
     }
     match req.mode {
         VideoMode::TextToVideo | VideoMode::Distilled => {}
@@ -91,9 +114,12 @@ pub fn validate_video_request(req: &VideoJobRequest, profile: &str) -> Result<()
 }
 
 struct LtxBudget {
-    max_side: u32,
+    max_native_side: u32,
     max_frames: u32,
     max_pixel_frames: u64,
+    max_output_side: u32,
+    max_output_pixels: u64,
+    max_upscaled_frames: u32,
     label: &'static str,
     guidance: &'static str,
 }
@@ -109,36 +135,48 @@ fn ltx_budget(req: &VideoJobRequest, profile: &str) -> LtxBudget {
 
     if h200 && distilled_like {
         return LtxBudget {
-            max_side: 1536,
+            max_native_side: 1536,
             max_frames: 241,
             max_pixel_frames: 1024 * 576 * 241,
+            max_output_side: 4096,
+            max_output_pixels: 4096 * 2160,
+            max_upscaled_frames: 121,
             label: "H200 distilled LTX",
             guidance: "use up to 10 seconds at 1024x576, or reduce resolution for longer clips",
         };
     }
     if h200 {
         return LtxBudget {
-            max_side: 1536,
+            max_native_side: 1536,
             max_frames: 121,
             max_pixel_frames: 1024 * 576 * 121,
+            max_output_side: 4096,
+            max_output_pixels: 4096 * 2160,
+            max_upscaled_frames: 121,
             label: "H200 full 22B bf16 LTX",
             guidance: "use 5 seconds at 1024x576 for full 22B bf16; use distilled or reduce resolution for longer clips",
         };
     }
     if h100 && distilled_like {
         return LtxBudget {
-            max_side: 1024,
+            max_native_side: 1024,
             max_frames: 121,
             max_pixel_frames: 1024 * 576 * 121,
+            max_output_side: 4096,
+            max_output_pixels: 4096 * 2160,
+            max_upscaled_frames: 121,
             label: "H100 distilled LTX",
             guidance: "use 5 seconds at 1024x576, or switch to H200 for longer HD clips",
         };
     }
     if h100 {
         return LtxBudget {
-            max_side: 1024,
+            max_native_side: 1024,
             max_frames: 121,
             max_pixel_frames: 768 * 448 * 121,
+            max_output_side: 4096,
+            max_output_pixels: 4096 * 2160,
+            max_upscaled_frames: 121,
             label: "H100 full 22B bf16 LTX",
             guidance:
                 "use 5 seconds at 768x448 for full 22B bf16; use distilled or H200 for larger clips",
@@ -146,17 +184,23 @@ fn ltx_budget(req: &VideoJobRequest, profile: &str) -> LtxBudget {
     }
     if distilled_like {
         return LtxBudget {
-            max_side: 1024,
+            max_native_side: 1024,
             max_frames: 121,
             max_pixel_frames: 1024 * 576 * 121,
+            max_output_side: 1024,
+            max_output_pixels: 1024 * 1024,
+            max_upscaled_frames: 121,
             label: "local distilled LTX",
             guidance: "use 5 seconds at 1024x576, or reduce resolution for longer clips",
         };
     }
     LtxBudget {
-        max_side: 1024,
+        max_native_side: 1024,
         max_frames: 121,
         max_pixel_frames: 768 * 448 * 121,
+        max_output_side: 1024,
+        max_output_pixels: 1024 * 1024,
+        max_upscaled_frames: 121,
         label: "local full 22B LTX",
         guidance: "use 5 seconds at 768x448, or switch to the H200 profile for larger jobs",
     }
@@ -291,15 +335,38 @@ mod tests {
     }
 
     #[test]
-    fn rejects_h100_full_22b_5s_hd_budget() {
+    fn accepts_h100_full_22b_5s_hd_as_upscaled_budget() {
         let req = base_request(VideoMode::TextToVideo, 1024, 576, 121);
-        let err = validate_video_request(&req, "cloud_h100").unwrap_err();
-        assert!(err.to_string().contains("H100 full 22B bf16"));
+        assert!(validate_video_request(&req, "cloud_h100").is_ok());
     }
 
     #[test]
     fn accepts_h100_distilled_5s_hd_budget() {
         let req = base_request(VideoMode::Distilled, 1024, 576, 121);
         assert!(validate_video_request(&req, "cloud_h100").is_ok());
+    }
+
+    #[test]
+    fn accepts_h200_4k_upscaled_5s_budget() {
+        let req = base_request(VideoMode::TextToVideo, 3840, 2160, 121);
+        assert!(validate_video_request(&req, "cloud_h200").is_ok());
+    }
+
+    #[test]
+    fn rejects_h200_4k_upscaled_10s_full_budget() {
+        let req = base_request(VideoMode::TextToVideo, 3840, 2160, 241);
+        assert!(validate_video_request(&req, "cloud_h200").is_err());
+    }
+
+    #[test]
+    fn accepts_h100_4k_upscaled_5s_budget() {
+        let req = base_request(VideoMode::TextToVideo, 3840, 2160, 121);
+        assert!(validate_video_request(&req, "cloud_h100").is_ok());
+    }
+
+    #[test]
+    fn rejects_square_4096_output_over_4k_pixels() {
+        let req = base_request(VideoMode::TextToVideo, 4096, 4096, 121);
+        assert!(validate_video_request(&req, "cloud_h200").is_err());
     }
 }

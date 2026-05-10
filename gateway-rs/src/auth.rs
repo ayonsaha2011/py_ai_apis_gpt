@@ -52,12 +52,16 @@ pub async fn require_user(headers: &HeaderMap, state: &AppState) -> Result<User>
         .ok_or(AppError::Unauthorized)
 }
 
-pub fn require_admin(headers: &HeaderMap, state: &AppState) -> Result<()> {
+pub async fn require_admin(headers: &HeaderMap, state: &AppState) -> Result<()> {
     let supplied = headers
         .get("x-admin-key")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     if !state.config.admin_api_key.is_empty() && supplied == state.config.admin_api_key {
+        return Ok(());
+    }
+    let user = require_user(headers, state).await?;
+    if user.role == "admin" {
         Ok(())
     } else {
         Err(AppError::Forbidden)

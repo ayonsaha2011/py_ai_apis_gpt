@@ -1,4 +1,4 @@
-use std::{convert::Infallible, time::Duration};
+use std::{convert::Infallible, io::SeekFrom, time::Duration};
 
 use axum::{
     body::Body,
@@ -11,6 +11,7 @@ use axum::{
 use futures_util::{StreamExt, TryStreamExt};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_stream::wrappers::IntervalStream;
 use tower_http::services::{ServeDir, ServeFile};
 use uuid::Uuid;
@@ -55,6 +56,7 @@ pub fn router(state: AppState) -> Router {
         .route("/v1/video/jobs/:id/events", get(video_job_events))
         .route("/admin/gpus", get(admin_gpus))
         .route("/admin/services", get(admin_services))
+        .route("/admin/logs/:service", get(admin_logs))
         .route("/admin/services/:name/start", post(admin_start_service))
         .route("/admin/services/:name/stop", post(admin_stop_service))
         .route("/admin/models/:model_id/start", post(admin_start_model))
@@ -82,6 +84,11 @@ struct HistoryQuery {
     session_id: Option<String>,
     limit: Option<i64>,
     offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogsQuery {
+    lines: Option<usize>,
 }
 
 pub fn spawn_video_dispatcher(state: AppState) {
@@ -121,8 +128,19 @@ async fn register(
     if state.db.user_by_email(&email).await?.is_some() {
         return Err(AppError::Conflict("email already registered".into()));
     }
+    let role = if state.db.user_count().await? == 0
+        || state
+            .config
+            .admin_emails
+            .iter()
+            .any(|value| value == &email)
+    {
+        "admin"
+    } else {
+        "user"
+    };
     let password_hash = auth::hash_password(&req.password)?;
-    let user = state.db.create_user(&email, &password_hash).await?;
+    let user = state.db.create_user(&email, &password_hash, role).await?;
     let token = auth::new_token();
     state
         .db
@@ -136,6 +154,7 @@ async fn register(
         access_token: token,
         token_type: "bearer",
         expires_in: state.config.session_ttl.as_secs(),
+        role: user.role,
     }))
 }
 
@@ -163,6 +182,7 @@ async fn login(
         access_token: token,
         token_type: "bearer",
         expires_in: state.config.session_ttl.as_secs(),
+        role: user.role,
     }))
 }
 
@@ -181,6 +201,7 @@ async fn me(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Me
     Ok(Json(MeResponse {
         user_id: user.id,
         email: user.email,
+        role: user.role,
         created_at: user.created_at,
     }))
 }
@@ -505,13 +526,34 @@ async fn video_job_events(
 }
 
 async fn admin_gpus(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>> {
-    auth::require_admin(&headers, &state)?;
+    auth::require_admin(&headers, &state).await?;
     Ok(Json(json!({"gpus": gpu::list_gpus().unwrap_or_default()})))
 }
 
 async fn admin_services(State(state): State<AppState>, headers: HeaderMap) -> Result<Json<Value>> {
-    auth::require_admin(&headers, &state)?;
+    auth::require_admin(&headers, &state).await?;
     Ok(Json(json!({"services": state.runtime.list().await?})))
+}
+
+async fn admin_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(service): Path<String>,
+    Query(query): Query<LogsQuery>,
+) -> Result<Json<Value>> {
+    auth::require_admin(&headers, &state).await?;
+    let Some(name) = log_name(&service) else {
+        return Err(AppError::BadRequest("unknown service log".into()));
+    };
+    let lines = query.lines.unwrap_or(200).clamp(1, 2000);
+    let path = state.config.log_dir.join(format!("{name}.log"));
+    let content = tail_file(&path, lines).await?;
+    Ok(Json(json!({
+        "service": name,
+        "path": path,
+        "lines": lines,
+        "content": content,
+    })))
 }
 
 async fn admin_start_service(
@@ -519,7 +561,7 @@ async fn admin_start_service(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<Value>> {
-    auth::require_admin(&headers, &state)?;
+    auth::require_admin(&headers, &state).await?;
     Ok(Json(json!(state.runtime.start(&name).await?)))
 }
 
@@ -528,7 +570,7 @@ async fn admin_stop_service(
     headers: HeaderMap,
     Path(name): Path<String>,
 ) -> Result<Json<Value>> {
-    auth::require_admin(&headers, &state)?;
+    auth::require_admin(&headers, &state).await?;
     Ok(Json(json!(state.runtime.stop(&name).await?)))
 }
 
@@ -537,7 +579,7 @@ async fn admin_start_model(
     headers: HeaderMap,
     Path(model_id): Path<String>,
 ) -> Result<Json<Value>> {
-    auth::require_admin(&headers, &state)?;
+    auth::require_admin(&headers, &state).await?;
     let resp = state
         .http
         .post(format!(
@@ -639,4 +681,43 @@ async fn proxy_json(resp: reqwest::Response) -> Result<Json<Value>> {
         .await
         .unwrap_or_else(|_| json!({"status": status.as_u16()}));
     Ok(Json(value))
+}
+
+fn log_name(service: &str) -> Option<&'static str> {
+    match service {
+        "gateway" => Some("gateway"),
+        "text" | "text-worker" => Some("text"),
+        "ltx" | "ltx-worker" => Some("ltx"),
+        "qdrant" => Some("qdrant"),
+        _ => None,
+    }
+}
+
+async fn tail_file(path: &std::path::Path, lines: usize) -> Result<String> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|_| AppError::NotFound)?;
+    let len = file
+        .metadata()
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?
+        .len();
+    let start = len.saturating_sub(1024 * 1024);
+    file.seek(SeekFrom::Start(start))
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let mut buf = String::new();
+    file.read_to_string(&mut buf)
+        .await
+        .map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let selected = buf
+        .lines()
+        .rev()
+        .take(lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(selected)
 }

@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   Clock3,
   Database,
+  FileText,
   History,
   Image as ImageIcon,
   KeyRound,
@@ -58,6 +59,8 @@ const modeLabels: Record<VideoMode, string> = {
 const resolutionPresets = [
   { label: "SD wide", width: "768", height: "448" },
   { label: "HD wide", width: "1024", height: "576" },
+  { label: "2K wide", width: "2048", height: "1152" },
+  { label: "4K UHD", width: "3840", height: "2160" },
   { label: "Square", width: "768", height: "768" },
   { label: "Portrait", width: "576", height: "1024" },
 ];
@@ -166,6 +169,7 @@ type Config = {
 type User = {
   user_id: string;
   email: string;
+  role: "admin" | "user" | string;
   created_at: number;
 };
 
@@ -247,38 +251,80 @@ function videoBudgetWarning(form: VideoForm, profile: string): string {
   const lowered = profile.toLowerCase();
   const h200 = lowered.includes("h200");
   const h100 = lowered.includes("h100");
-  let maxFrames = 121;
+  let maxNativeFrames = 121;
+  let maxUpscaledFrames = 121;
   let maxPixelFrames = 768 * 448 * 121;
+  let maxNativeSide = 1024;
+  let maxOutputSide = 1024;
+  let maxOutputPixels = 1024 * 1024;
   let label = "local full 22B";
   let guidance = "Use 5 seconds at 768x448, or select a cloud profile for larger jobs.";
   if (h200 && distilledLike) {
-    maxFrames = 241;
+    maxNativeFrames = 241;
+    maxUpscaledFrames = 121;
     maxPixelFrames = 1024 * 576 * 241;
+    maxNativeSide = 1536;
+    maxOutputSide = 4096;
+    maxOutputPixels = 4096 * 2160;
     label = "H200 distilled/specialized";
-    guidance = "Use 10 seconds or less at 1024x576, or reduce resolution for longer clips.";
+    guidance = "Use 10 seconds at HD, or 5 seconds for 4K upscaled output.";
   } else if (h200) {
-    maxFrames = 121;
     maxPixelFrames = 1024 * 576 * 121;
+    maxNativeSide = 1536;
+    maxOutputSide = 4096;
+    maxOutputPixels = 4096 * 2160;
     label = "H200 full 22B bf16";
-    guidance = "Use 5 seconds at 1024x576 for full 22B, or switch to Fast distilled for longer clips.";
+    guidance = "Use 5 seconds at HD or 4K upscaled output, or switch to Fast distilled for longer HD clips.";
   } else if (h100 && distilledLike) {
-    maxFrames = 121;
     maxPixelFrames = 1024 * 576 * 121;
+    maxOutputSide = 4096;
+    maxOutputPixels = 4096 * 2160;
     label = "H100 distilled/specialized";
-    guidance = "Use 5 seconds at 1024x576, or switch to H200 for longer HD clips.";
+    guidance = "Use 5 seconds at HD or 4K upscaled output, or switch to H200 for longer HD clips.";
   } else if (h100) {
-    maxFrames = 121;
     maxPixelFrames = 768 * 448 * 121;
+    maxOutputSide = 4096;
+    maxOutputPixels = 4096 * 2160;
     label = "H100 full 22B bf16";
-    guidance = "Use 5 seconds at 768x448 for full 22B, or switch to Fast distilled/H200 for larger clips.";
+    guidance = "Use 5 seconds at SD or 4K upscaled output, or switch to Fast distilled/H200 for larger clips.";
   } else if (distilledLike) {
     maxPixelFrames = 1024 * 576 * 121;
     label = "local distilled/specialized";
     guidance = "Use 5 seconds at 1024x576, or reduce resolution for longer clips.";
   }
-  if (frames > maxFrames) return `${label} jobs allow ${maxFrames} frames here. ${guidance}`;
-  if (width * height * frames > maxPixelFrames) return `${label} memory budget is exceeded. ${guidance}`;
+  if (width > maxOutputSide || height > maxOutputSide) return `${label} supports output up to ${maxOutputSide}px per side.`;
+  if (width * height > maxOutputPixels) return `${label} supports up to 4K output pixels.`;
+  const nativeRequest = width <= maxNativeSide && height <= maxNativeSide && frames <= maxNativeFrames && width * height * frames <= maxPixelFrames;
+  if (!nativeRequest && frames > maxUpscaledFrames) return `${label} 4K/upscaled output allows ${maxUpscaledFrames} frames here. ${guidance}`;
+  if (!nativeRequest && maxOutputSide <= maxNativeSide) return `${label} memory budget is exceeded. ${guidance}`;
   return "";
+}
+
+function videoGenerationMode(form: VideoForm, profile: string): string {
+  return videoBudgetWarning(form, profile) ? "Blocked" : isUpscaledOutput(form, profile) ? "4K upscale" : "Native";
+}
+
+function isUpscaledOutput(form: VideoForm, profile: string): boolean {
+  const width = Number(form.width);
+  const height = Number(form.height);
+  const frames = Number(form.frames);
+  const lowered = profile.toLowerCase();
+  const h200 = lowered.includes("h200");
+  const h100 = lowered.includes("h100");
+  const distilledLike = form.mode === "distilled" || form.mode === "video_to_video" || form.mode === "hdr";
+  let maxNativeSide = h200 ? 1536 : 1024;
+  let maxNativeFrames = h200 && distilledLike ? 241 : 121;
+  let maxPixelFrames = h200 || distilledLike ? 1024 * 576 * maxNativeFrames : 768 * 448 * 121;
+  if (h100 && !distilledLike) maxPixelFrames = 768 * 448 * 121;
+  if (!h100 && !h200) return false;
+  return width > maxNativeSide || height > maxNativeSide || width * height * frames > maxPixelFrames;
+}
+
+function videoSizeValid(form: VideoForm, profile: string): boolean {
+  const width = Number(form.width);
+  const height = Number(form.height);
+  if (!Number.isFinite(width) || !Number.isFinite(height)) return false;
+  return (width % 32 === 0 && height % 32 === 0) || (isUpscaledOutput(form, profile) && width % 2 === 0 && height % 2 === 0);
 }
 
 function App() {
@@ -287,10 +333,12 @@ function App() {
   const [health, setHealth] = useState("offline");
   const [gatewayProfile, setGatewayProfile] = useState("cloud_h200");
   const [user, setUser] = useState<User | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const [toast, setToast] = useState("");
   const [busy, setBusy] = useState(false);
 
   const apiBase = useMemo(() => config.apiBase.replace(/\/$/, ""), [config.apiBase]);
+  const isAdmin = user?.role === "admin";
   const title = useMemo(() => titleFor(location.pathname), [location.pathname]);
 
   const notify = useCallback((message: string) => {
@@ -317,14 +365,15 @@ function App() {
     async <T,>(path: string, init: RequestInit = {}): Promise<T> => {
       const headers = new Headers(init.headers);
       headers.set("Content-Type", "application/json");
-      headers.set("x-admin-key", config.adminKey);
+      if (config.token) headers.set("Authorization", `Bearer ${config.token}`);
+      if (config.adminKey) headers.set("x-admin-key", config.adminKey);
       const response = await fetch(`${apiBase}${path}`, { ...init, headers });
       const text = await response.text();
       const data = text ? safeJson(text) : {};
       if (!response.ok) throw new Error(errorMessage(data));
       return data as T;
     },
-    [apiBase, config.adminKey],
+    [apiBase, config.adminKey, config.token],
   );
 
   const refreshMe = useCallback(async () => {
@@ -338,6 +387,7 @@ function App() {
 
     if (!config.token) {
       setUser(null);
+      setAuthReady(true);
       return;
     }
 
@@ -346,6 +396,8 @@ function App() {
     } catch (err) {
       setUser(null);
       notify(errorMessage(err));
+    } finally {
+      setAuthReady(true);
     }
   }, [config.token, notify, request]);
 
@@ -356,6 +408,7 @@ function App() {
   }, [config]);
 
   useEffect(() => {
+    setAuthReady(false);
     void refreshMe();
   }, [refreshMe]);
 
@@ -367,6 +420,7 @@ function App() {
         body: JSON.stringify({ email, password }),
       });
       setConfig((current) => ({ ...current, token: data.access_token }));
+      setAuthReady(false);
       notify(mode === "register" ? "Account created" : "Signed in");
     } finally {
       setBusy(false);
@@ -381,12 +435,13 @@ function App() {
     }
     setConfig((current) => ({ ...current, token: "" }));
     setUser(null);
+    setAuthReady(true);
   }
 
   return (
     <div className="min-h-screen bg-[#f6f7f9]">
       <div className="grid min-h-screen grid-cols-1 lg:grid-cols-[292px_minmax(0,1fr)]">
-        <Sidebar config={config} health={health} onConfig={setConfig} />
+        <Sidebar config={config} health={health} user={user} onConfig={setConfig} />
         <main className="grid content-start gap-5 p-4 sm:p-6">
           <Topbar title={title} user={user} busy={busy} onRefresh={refreshMe} onLogout={logout} />
           <Routes>
@@ -397,7 +452,18 @@ function App() {
             <Route path="/video" element={<VideoPage request={request} apiBase={apiBase} token={config.token} profile={gatewayProfile} notify={notify} />} />
             <Route path="/rag" element={<RagPage request={request} notify={notify} />} />
             <Route path="/history" element={<HistoryPage request={request} notify={notify} />} />
-            <Route path="/admin" element={<AdminPage adminRequest={adminRequest} notify={notify} />} />
+            <Route
+              path="/admin"
+              element={
+                !authReady && config.token ? (
+                  <EmptyState icon={<Shield size={22} />} title="Checking access" />
+                ) : isAdmin ? (
+                  <AdminPage adminRequest={adminRequest} notify={notify} />
+                ) : (
+                  <Navigate to="/chat" replace />
+                )
+              }
+            />
             <Route path="*" element={<Navigate to="/chat" replace />} />
           </Routes>
         </main>
@@ -410,14 +476,17 @@ function App() {
 function Sidebar({
   config,
   health,
+  user,
   onConfig,
 }: {
   config: Config;
   health: string;
+  user: User | null;
   onConfig: (config: Config) => void;
 }) {
   const location = useLocation();
   const [draft, setDraft] = useState(config);
+  const isAdmin = user?.role === "admin";
 
   useEffect(() => setDraft(config), [config]);
 
@@ -454,9 +523,11 @@ function Sidebar({
           <NavItem to="/history" icon={<History size={18} />} active={location.pathname.startsWith("/history")}>
             History
           </NavItem>
-          <NavItem to="/admin" icon={<Shield size={18} />} active={location.pathname.startsWith("/admin")}>
-            Admin
-          </NavItem>
+          {isAdmin ? (
+            <NavItem to="/admin" icon={<Shield size={18} />} active={location.pathname.startsWith("/admin")}>
+              Admin
+            </NavItem>
+          ) : null}
         </nav>
 
         <form
@@ -478,10 +549,12 @@ function Sidebar({
             Session
             <input className="input border-white/[0.15] bg-white/10 text-white placeholder:text-slate-400" value={draft.token} onChange={(event) => setDraft({ ...draft, token: event.target.value })} />
           </label>
-          <label className="field text-slate-300">
-            Admin Key
-            <input className="input border-white/[0.15] bg-white/10 text-white placeholder:text-slate-400" value={draft.adminKey} onChange={(event) => setDraft({ ...draft, adminKey: event.target.value })} />
-          </label>
+          {isAdmin ? (
+            <label className="field text-slate-300">
+              Admin Key
+              <input className="input border-white/[0.15] bg-white/10 text-white placeholder:text-slate-400" value={draft.adminKey} onChange={(event) => setDraft({ ...draft, adminKey: event.target.value })} />
+            </label>
+          ) : null}
           <button className="btn border-white/[0.15] bg-white/10 text-white hover:bg-white/[0.15] hover:text-white" type="submit">
             <CheckCircle2 size={16} />
             Save
@@ -523,7 +596,7 @@ function Topbar({
     <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
       <div className="min-w-0">
         <h1 className="text-2xl font-semibold text-ink">{title}</h1>
-        <p className="mt-1 truncate text-sm text-muted">{user ? `${user.email} - ${user.user_id}` : "Not signed in"}</p>
+        <p className="mt-1 truncate text-sm text-muted">{user ? `${user.email} - ${user.role}` : "Not signed in"}</p>
       </div>
       <div className="flex flex-wrap gap-2">
         <button className="btn" type="button" onClick={onRefresh} disabled={busy}>
@@ -794,8 +867,9 @@ function VideoPage({
 
   const mediaRequirements = videoRequirements(form.mode);
   const frameValid = /^\d+$/.test(form.frames) && (Number(form.frames) - 1) % 8 === 0;
-  const sizeValid = Number(form.width) % 32 === 0 && Number(form.height) % 32 === 0;
+  const sizeValid = videoSizeValid(form, profile);
   const budgetWarning = videoBudgetWarning(form, profile);
+  const generationMode = videoGenerationMode(form, profile);
 
   function patch<K extends keyof VideoForm>(key: K, value: VideoForm[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -850,7 +924,7 @@ function VideoPage({
   async function submit(event: FormEvent) {
     event.preventDefault();
     if (!sizeValid || !frameValid) {
-      notify("Video size must be divisible by 32 and frames must satisfy 8k+1.");
+      notify("Video size must be valid for native or upscaled output, and frames must satisfy 8k+1.");
       return;
     }
     if (budgetWarning) {
@@ -923,7 +997,7 @@ function VideoPage({
               <p className="mt-1 text-sm text-muted">Unique queued generations with gateway validation and SSE progress.</p>
             </div>
             <div className="flex flex-wrap gap-2">
-              <QualityPill ok={sizeValid} label="32px grid" />
+              <QualityPill ok={sizeValid} label="size valid" />
               <QualityPill ok={frameValid} label="8k+1 frames" />
               <QualityPill ok={!budgetWarning} label="GPU budget" />
             </div>
@@ -957,6 +1031,10 @@ function VideoPage({
                     {preset.label}
                   </button>
                 ))}
+              </div>
+              <div className="rounded-md border border-line bg-slate-50 px-3 py-2 text-sm font-semibold text-muted">
+                Output mode: <span className="text-ink">{generationMode}</span>
+                {generationMode === "4K upscale" ? <span className="text-muted"> from the safe native GPU budget.</span> : null}
               </div>
             </div>
 
@@ -1054,6 +1132,7 @@ function VideoPage({
             <div className="grid gap-2 text-sm">
               <SetupRow icon={<Video size={15} />} label="Mode" value={modeLabels[form.mode]} />
               <SetupRow icon={<Server size={15} />} label="Profile" value={profile} />
+              <SetupRow icon={<Sparkles size={15} />} label="Output" value={generationMode} />
               <SetupRow icon={<ImageIcon size={15} />} label="Canvas" value={`${form.width}x${form.height}`} />
               <SetupRow icon={<Clock3 size={15} />} label="Duration" value={`${form.duration}s`} />
               <SetupRow icon={<Clapperboard size={15} />} label="Frames" value={form.frames} />
@@ -1339,6 +1418,9 @@ function AdminPage({
 }) {
   const [model, setModel] = useState(defaultModel);
   const [output, setOutput] = useState<unknown>(null);
+  const [logService, setLogService] = useState("ltx");
+  const [logLines, setLogLines] = useState("200");
+  const [logs, setLogs] = useState<{ service?: string; path?: string; content?: string } | null>(null);
 
   async function run(path: string, init?: RequestInit) {
     try {
@@ -1354,42 +1436,83 @@ function AdminPage({
     await run(`/admin/models/${encodeURIComponent(model)}/start`, { method: "POST" });
   }
 
+  async function loadLogs() {
+    try {
+      const data = await adminRequest<{ service?: string; path?: string; content?: string }>(`/admin/logs/${logService}?lines=${encodeURIComponent(logLines)}`);
+      setLogs(data);
+    } catch (err) {
+      notify(errorMessage(err));
+      setLogs({ content: errorMessage(err) });
+    }
+  }
+
   return (
     <section className="grid gap-4">
-      <div className="surface grid gap-4">
-        <div className="flex flex-wrap gap-2">
-          <button className="btn" type="button" onClick={() => void run("/status")}>
-            <Activity size={16} />
-            Status
-          </button>
-          <button className="btn" type="button" onClick={() => void run("/admin/gpus")}>
-            <Server size={16} />
-            GPUs
-          </button>
-          <button className="btn" type="button" onClick={() => void run("/admin/services")}>
-            <Settings size={16} />
-            Services
-          </button>
-          <button className="btn" type="button" onClick={() => void run("/admin/services/text-worker/start", { method: "POST" })}>
-            <Play size={16} />
-            Text
-          </button>
-          <button className="btn" type="button" onClick={() => void run("/admin/services/ltx-worker/start", { method: "POST" })}>
-            <Video size={16} />
-            LTX
-          </button>
-          <button className="btn btn-danger" type="button" onClick={() => void run("/admin/services/ltx-worker/stop", { method: "POST" })}>
-            <Square size={16} />
-            Stop LTX
-          </button>
+      <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_460px]">
+        <div className="surface grid gap-4">
+          <div className="grid gap-2 sm:grid-cols-3">
+            <button className="btn min-h-12 justify-start" type="button" onClick={() => void run("/status")}>
+              <Activity size={16} />
+              Status
+            </button>
+            <button className="btn min-h-12 justify-start" type="button" onClick={() => void run("/admin/gpus")}>
+              <Server size={16} />
+              GPUs
+            </button>
+            <button className="btn min-h-12 justify-start" type="button" onClick={() => void run("/admin/services")}>
+              <Settings size={16} />
+              Services
+            </button>
+            <button className="btn min-h-12 justify-start" type="button" onClick={() => void run("/admin/services/text-worker/start", { method: "POST" })}>
+              <Play size={16} />
+              Start text
+            </button>
+            <button className="btn min-h-12 justify-start" type="button" onClick={() => void run("/admin/services/ltx-worker/start", { method: "POST" })}>
+              <Video size={16} />
+              Start LTX
+            </button>
+            <button className="btn btn-danger min-h-12 justify-start" type="button" onClick={() => void run("/admin/services/ltx-worker/stop", { method: "POST" })}>
+              <Square size={16} />
+              Stop LTX
+            </button>
+          </div>
+          <form className="grid gap-3 md:grid-cols-[minmax(0,520px)_auto]" onSubmit={startModel}>
+            <TextField label="Model" value={model} onChange={setModel} />
+            <button className="btn btn-primary self-end" type="submit">
+              <RotateCw size={16} />
+              Start Model
+            </button>
+          </form>
         </div>
-        <form className="grid gap-3 md:grid-cols-[minmax(0,520px)_auto]" onSubmit={startModel}>
-          <TextField label="Model" value={model} onChange={setModel} />
-          <button className="btn btn-primary self-end" type="submit">
-            <RotateCw size={16} />
-            Start Model
+
+        <div className="surface grid content-start gap-3">
+          <div className="flex items-center gap-2">
+            <FileText size={18} />
+            <h2 className="section-title">Server logs</h2>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-[1fr_110px]">
+            <label className="field">
+              Service
+              <select className="input" value={logService} onChange={(event) => setLogService(event.target.value)}>
+                <option value="gateway">gateway</option>
+                <option value="text">text</option>
+                <option value="ltx">ltx</option>
+                <option value="qdrant">qdrant</option>
+              </select>
+            </label>
+            <NumberField label="Lines" value={logLines} step={50} onChange={setLogLines} />
+          </div>
+          <button className="btn btn-primary justify-self-start" type="button" onClick={() => void loadLogs()}>
+            <RefreshCw size={16} />
+            Load logs
           </button>
-        </form>
+          {logs ? (
+            <div className="grid gap-2">
+              <div className="truncate text-xs font-semibold text-muted">{logs.path || logs.service}</div>
+              <pre className="code-block max-h-[520px] whitespace-pre-wrap">{logs.content || ""}</pre>
+            </div>
+          ) : null}
+        </div>
       </div>
       <DataView value={output} />
     </section>

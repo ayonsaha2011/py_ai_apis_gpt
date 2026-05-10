@@ -1,4 +1,4 @@
-use std::{collections::HashMap, process::Stdio, sync::Arc};
+use std::{collections::HashMap, fs::OpenOptions, process::Stdio, sync::Arc};
 
 use async_trait::async_trait;
 use tokio::{
@@ -43,6 +43,14 @@ impl NativeBackend {
         }
     }
 
+    fn canonical_name(name: &str) -> Option<&'static str> {
+        match name {
+            "text-worker" | "text" => Some("text"),
+            "ltx-worker" | "ltx" => Some("ltx"),
+            _ => None,
+        }
+    }
+
     fn workdir_for(&self, name: &str) -> Option<&'static str> {
         match name {
             "text-worker" | "text" => Some("services/text-worker"),
@@ -62,6 +70,7 @@ impl RuntimeBackend for NativeBackend {
                 detail: Some("no native command configured".into()),
             });
         };
+        let canonical_name = Self::canonical_name(name).unwrap_or(name);
         let mut guard = self.children.lock().await;
         if guard.contains_key(name) {
             return Ok(ServiceStatus {
@@ -74,13 +83,18 @@ impl RuntimeBackend for NativeBackend {
         let service_dir = self.workdir_for(name).map(|d| root.join(d));
         let cache_dir = root.join(".uv-cache");
         tokio::fs::create_dir_all(&cache_dir).await?;
+        tokio::fs::create_dir_all(&self.config.log_dir).await?;
+        let log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.config.log_dir.join(format!("{canonical_name}.log")))?;
         let child = if cfg!(windows) {
             let mut cmd = Command::new("powershell");
             cmd.args(["-NoProfile", "-Command", command])
                 .env("UV_CACHE_DIR", &cache_dir)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stdout(Stdio::from(log_file.try_clone()?))
+                .stderr(Stdio::from(log_file));
             if let Some(dir) = service_dir {
                 cmd.current_dir(dir);
             }
@@ -90,8 +104,8 @@ impl RuntimeBackend for NativeBackend {
             cmd.args(["-lc", command])
                 .env("UV_CACHE_DIR", &cache_dir)
                 .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+                .stdout(Stdio::from(log_file.try_clone()?))
+                .stderr(Stdio::from(log_file));
             if let Some(dir) = service_dir {
                 cmd.current_dir(dir);
             }

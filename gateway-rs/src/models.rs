@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct User {
     pub id: String,
     pub email: String,
+    pub role: String,
     pub created_at: i64,
 }
 
@@ -24,12 +25,14 @@ pub struct TokenResponse {
     pub access_token: String,
     pub token_type: &'static str,
     pub expires_in: u64,
+    pub role: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct MeResponse {
     pub user_id: String,
     pub email: String,
+    pub role: String,
     pub created_at: i64,
 }
 

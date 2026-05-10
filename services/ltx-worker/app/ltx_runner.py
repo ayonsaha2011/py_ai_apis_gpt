@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import gc
+import math
+import shutil
+import subprocess
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -90,63 +93,122 @@ def ensure_runtime_ready() -> None:
 
 
 def validate_ltx_budget(req: VideoRequest) -> None:
-    if req.width % 32 != 0 or req.height % 32 != 0:
-        raise ValueError("width and height must be divisible by 32")
     if (req.num_frames - 1) % 8 != 0:
         raise ValueError("num_frames must satisfy 8k+1")
     if req.num_inference_steps is not None and not 1 <= req.num_inference_steps <= 40:
         raise ValueError("num_inference_steps must be between 1 and 40")
 
+    budget = _ltx_budget(req)
+    native_request = _native_request_fits(req, budget)
+    upscaled_request = (
+        not native_request
+        and budget["max_output_side"] > budget["max_native_side"]
+        and req.num_frames <= budget["max_upscaled_frames"]
+    )
+    if req.width % 32 != 0 or req.height % 32 != 0:
+        if not upscaled_request or req.width % 2 != 0 or req.height % 2 != 0:
+            raise ValueError(
+                "width and height must be divisible by 32 for native generation, or even for 4K upscaled output"
+            )
+    if req.width > budget["max_output_side"] or req.height > budget["max_output_side"]:
+        raise ValueError(f"width/height exceed 4K output limit {budget['max_output_side']}")
+    output_pixels = req.width * req.height
+    if output_pixels > budget["max_output_pixels"]:
+        raise ValueError(f"width/height exceed 4K output pixel limit {budget['max_output_pixels']}")
+    max_frame_limit = max(budget["max_frames"], budget["max_upscaled_frames"])
+    if req.num_frames > max_frame_limit:
+        raise ValueError(f"num_frames exceeds {max_frame_limit} for {budget['label']}; {budget['guidance']}")
+    pixel_frames = req.width * req.height * req.num_frames
+    if not native_request and (
+        req.num_frames > budget["max_upscaled_frames"] or budget["max_output_side"] <= budget["max_native_side"]
+    ):
+        raise ValueError(
+            f"request exceeds {budget['label']} memory budget ({pixel_frames} pixel-frames > {budget['max_pixel_frames']}); {budget['guidance']}"
+        )
+
+
+def _ltx_budget(req: VideoRequest) -> dict[str, Any]:
     profile = settings.gpu_profile.lower()
     h200 = "h200" in profile
     h100 = "h100" in profile
     distilled_like = req.mode in {VideoMode.distilled, VideoMode.video_to_video, VideoMode.hdr}
     if h200 and distilled_like:
-        max_side = 1536
-        max_frames = 241
-        max_pixel_frames = 1024 * 576 * 241
-        label = "H200 distilled LTX"
-        guidance = "use up to 10 seconds at 1024x576, or reduce resolution for longer clips"
-    elif h200:
-        max_side = 1536
-        max_frames = 121
-        max_pixel_frames = 1024 * 576 * 121
-        label = "H200 full 22B bf16 LTX"
-        guidance = "use 5 seconds at 1024x576 for full 22B bf16; use distilled or reduce resolution for longer clips"
-    elif h100 and distilled_like:
-        max_side = 1024
-        max_frames = 121
-        max_pixel_frames = 1024 * 576 * 121
-        label = "H100 distilled LTX"
-        guidance = "use 5 seconds at 1024x576, or switch to H200 for longer HD clips"
-    elif h100:
-        max_side = 1024
-        max_frames = 121
-        max_pixel_frames = 768 * 448 * 121
-        label = "H100 full 22B bf16 LTX"
-        guidance = "use 5 seconds at 768x448 for full 22B bf16; use distilled or H200 for larger clips"
-    elif distilled_like:
-        max_side = 1024
-        max_frames = 121
-        max_pixel_frames = 1024 * 576 * 121
-        label = "local distilled LTX"
-        guidance = "use 5 seconds at 1024x576, or reduce resolution for longer clips"
-    else:
-        max_side = 1024
-        max_frames = 121
-        max_pixel_frames = 768 * 448 * 121
-        label = "local full 22B LTX"
-        guidance = "use 5 seconds at 768x448, or switch to the H200 profile for larger jobs"
+        return {
+            "max_native_side": 1536,
+            "max_frames": 241,
+            "max_pixel_frames": 1024 * 576 * 241,
+            "max_output_side": 4096,
+            "max_output_pixels": 4096 * 2160,
+            "max_upscaled_frames": 121,
+            "label": "H200 distilled LTX",
+            "guidance": "use up to 10 seconds at 1024x576, or reduce resolution for longer clips",
+        }
+    if h200:
+        return {
+            "max_native_side": 1536,
+            "max_frames": 121,
+            "max_pixel_frames": 1024 * 576 * 121,
+            "max_output_side": 4096,
+            "max_output_pixels": 4096 * 2160,
+            "max_upscaled_frames": 121,
+            "label": "H200 full 22B bf16 LTX",
+            "guidance": "use 5 seconds at 1024x576 for full 22B bf16; use distilled or reduce resolution for longer clips",
+        }
+    if h100 and distilled_like:
+        return {
+            "max_native_side": 1024,
+            "max_frames": 121,
+            "max_pixel_frames": 1024 * 576 * 121,
+            "max_output_side": 4096,
+            "max_output_pixels": 4096 * 2160,
+            "max_upscaled_frames": 121,
+            "label": "H100 distilled LTX",
+            "guidance": "use 5 seconds at 1024x576, or switch to H200 for longer HD clips",
+        }
+    if h100:
+        return {
+            "max_native_side": 1024,
+            "max_frames": 121,
+            "max_pixel_frames": 768 * 448 * 121,
+            "max_output_side": 4096,
+            "max_output_pixels": 4096 * 2160,
+            "max_upscaled_frames": 121,
+            "label": "H100 full 22B bf16 LTX",
+            "guidance": "use 5 seconds at 768x448 for full 22B bf16; use distilled or H200 for larger clips",
+        }
+    if distilled_like:
+        return {
+            "max_native_side": 1024,
+            "max_frames": 121,
+            "max_pixel_frames": 1024 * 576 * 121,
+            "max_output_side": 1024,
+            "max_output_pixels": 1024 * 1024,
+            "max_upscaled_frames": 121,
+            "label": "local distilled LTX",
+            "guidance": "use 5 seconds at 1024x576, or reduce resolution for longer clips",
+        }
+    return {
+        "max_native_side": 1024,
+        "max_frames": 121,
+        "max_pixel_frames": 768 * 448 * 121,
+        "max_output_side": 1024,
+        "max_output_pixels": 1024 * 1024,
+        "max_upscaled_frames": 121,
+        "label": "local full 22B LTX",
+        "guidance": "use 5 seconds at 768x448, or switch to the H200 profile for larger jobs",
+    }
 
-    if req.width > max_side or req.height > max_side:
-        raise ValueError(f"width/height exceed profile limit {max_side}")
-    if req.num_frames > max_frames:
-        raise ValueError(f"num_frames exceeds {max_frames} for {label}; {guidance}")
+
+def _native_request_fits(req: VideoRequest, budget: dict[str, Any]) -> bool:
     pixel_frames = req.width * req.height * req.num_frames
-    if pixel_frames > max_pixel_frames:
-        raise ValueError(
-            f"request exceeds {label} memory budget ({pixel_frames} pixel-frames > {max_pixel_frames}); {guidance}"
-        )
+    return (
+        req.width <= budget["max_native_side"]
+        and req.height <= budget["max_native_side"]
+        and req.num_frames <= budget["max_frames"]
+        and pixel_frames <= budget["max_pixel_frames"]
+        and req.width % 32 == 0
+        and req.height % 32 == 0
+    )
 
 
 @lru_cache(maxsize=1)
@@ -191,41 +253,114 @@ def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> P
     from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
     from ltx_pipelines.utils.media_io import encode_video
 
-    if req.mode == VideoMode.distilled:
+    generation_req, upscale_target = _generation_plan(req)
+    encode_path = output_path.parent / "native_output.mp4" if upscale_target else output_path
+
+    if generation_req.mode == VideoMode.distilled:
         video, audio = _distilled_pipeline()(
-            prompt=req.prompt,
+            prompt=generation_req.prompt,
             seed=seed,
-            height=req.height,
-            width=req.width,
-            num_frames=req.num_frames,
-            frame_rate=req.frame_rate or 24.0,
+            height=generation_req.height,
+            width=generation_req.width,
+            num_frames=generation_req.num_frames,
+            frame_rate=generation_req.frame_rate or 24.0,
             images=[],
             tiling_config=TilingConfig.default(),
-            enhance_prompt=bool(req.enhance_prompt),
+            enhance_prompt=bool(generation_req.enhance_prompt),
         )
-    elif req.mode in {VideoMode.text_to_video, VideoMode.image_to_video}:
-        images = _image_conditionings(req)
+    elif generation_req.mode in {VideoMode.text_to_video, VideoMode.image_to_video}:
+        images = _image_conditionings(generation_req)
         video, audio = _two_stage_pipeline()(
-            prompt=req.prompt,
-            negative_prompt=req.negative_prompt or "",
+            prompt=generation_req.prompt,
+            negative_prompt=generation_req.negative_prompt or "",
             seed=seed,
-            height=req.height,
-            width=req.width,
-            num_frames=req.num_frames,
-            frame_rate=req.frame_rate or 24.0,
-            num_inference_steps=req.num_inference_steps or 40,
-            video_guider_params=MultiModalGuiderParams(cfg_scale=req.guidance_scale or 7.5),
+            height=generation_req.height,
+            width=generation_req.width,
+            num_frames=generation_req.num_frames,
+            frame_rate=generation_req.frame_rate or 24.0,
+            num_inference_steps=generation_req.num_inference_steps or 40,
+            video_guider_params=MultiModalGuiderParams(cfg_scale=generation_req.guidance_scale or 7.5),
             audio_guider_params=MultiModalGuiderParams(),
             images=images,
             tiling_config=TilingConfig.default(),
-            enhance_prompt=bool(req.enhance_prompt),
+            enhance_prompt=bool(generation_req.enhance_prompt),
         )
     else:
-        video, audio = _run_specialized_pipeline(req, seed)
+        video, audio = _run_specialized_pipeline(generation_req, seed)
 
-    chunks = get_video_chunks_number(req.num_frames, TilingConfig.default())
-    encode_video(video=video, fps=int(req.frame_rate or 24), audio=audio, output_path=str(output_path), video_chunks_number=chunks)
+    chunks = get_video_chunks_number(generation_req.num_frames, TilingConfig.default())
+    encode_video(
+        video=video,
+        fps=int(generation_req.frame_rate or 24),
+        audio=audio,
+        output_path=str(encode_path),
+        video_chunks_number=chunks,
+    )
+    if upscale_target:
+        _upscale_video(encode_path, output_path, upscale_target[0], upscale_target[1])
     return output_path
+
+
+def _generation_plan(req: VideoRequest) -> tuple[VideoRequest, tuple[int, int] | None]:
+    budget = _ltx_budget(req)
+    if _native_request_fits(req, budget):
+        return req, None
+    native_pixels = max(32 * 32, budget["max_pixel_frames"] // max(req.num_frames, 1))
+    width, height = _fit_native_size(req.width, req.height, budget["max_native_side"], native_pixels)
+    data = req.model_dump()
+    data["width"] = width
+    data["height"] = height
+    return VideoRequest.model_validate(data), (req.width, req.height)
+
+
+def _fit_native_size(target_width: int, target_height: int, max_side: int, max_pixels: int) -> tuple[int, int]:
+    aspect = max(target_width, 1) / max(target_height, 1)
+    width = min(target_width, max_side, int(math.sqrt(max_pixels * aspect)))
+    height = min(target_height, max_side, int(width / aspect))
+    width = _floor_to_32(width)
+    height = _floor_to_32(height)
+    while width * height > max_pixels and (width > 256 or height > 256):
+        if width >= height and width > 256:
+            width -= 32
+        elif height > 256:
+            height -= 32
+        else:
+            break
+    return max(256, width), max(256, height)
+
+
+def _floor_to_32(value: int) -> int:
+    return max(256, (max(value, 256) // 32) * 32)
+
+
+def _upscale_video(input_path: Path, output_path: Path, width: int, height: int) -> None:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg is required for 4K video output but was not found on PATH")
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-i",
+        str(input_path),
+        "-vf",
+        f"scale={width}:{height}:flags=lanczos",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "slow",
+        "-crf",
+        "16",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "copy",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg 4K upscale failed: {result.stderr[-2000:]}")
 
 
 def _image_conditionings(req: VideoRequest) -> list[Any]:
