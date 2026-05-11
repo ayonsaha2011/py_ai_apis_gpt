@@ -149,6 +149,45 @@ const videoExamples: VideoExample[] = [
       "A close shot of dew drops sliding across a green leaf after sunrise, tiny insects moving in the background, soft golden light, macro lens, slow lateral camera movement, realistic bokeh.",
     negative: "blur, oversaturated colors, artificial leaf texture, frame jumps, noisy background",
   },
+  {
+    title: "20s HD showroom",
+    mode: "text_to_video",
+    width: "1024",
+    height: "576",
+    duration: "20",
+    frames: "481",
+    steps: "36",
+    cfg: "7.0",
+    prompt:
+      "A 20 second HD cinematic walk-through of a modern electric vehicle showroom at night, camera gliding from the glass entrance toward a silver concept car, reflections moving across polished floors, soft ceiling panels, subtle people silhouettes in the background, realistic commercial lighting, slow continuous motion.",
+    negative: "low quality, warped car body, flicker, jitter, smeared reflections, unreadable signage, duplicated wheels, fast cuts",
+  },
+  {
+    title: "20s HD food story",
+    mode: "text_to_video",
+    width: "1024",
+    height: "576",
+    duration: "20",
+    frames: "481",
+    steps: "36",
+    cfg: "7.0",
+    prompt:
+      "A 20 second HD restaurant kitchen sequence, close camera drifting past fresh herbs, a chef plating handmade pasta, steam rising under warm lamps, sauce poured slowly, final hero plate landing on a dark stone counter, natural hand motion, shallow depth of field, premium documentary style.",
+    negative: "messy hands, distorted utensils, flickering steam, overexposed highlights, warped plates, low detail food texture",
+  },
+  {
+    title: "20s HD travel reveal",
+    mode: "text_to_video",
+    width: "1024",
+    height: "576",
+    duration: "20",
+    frames: "481",
+    steps: "36",
+    cfg: "7.0",
+    prompt:
+      "A 20 second HD travel reveal at sunrise, camera starts behind linen curtains inside a quiet coastal hotel room, moves toward an open balcony, ocean waves and palm trees appear, sunlight spreads across the floor, curtains moving gently in the breeze, calm luxury resort atmosphere, smooth dolly movement.",
+    negative: "cartoon look, harsh camera shake, warped balcony rails, noisy water, flicker, oversaturated sky, low quality fabric",
+  },
 ];
 
 function savedConfig(): Config {
