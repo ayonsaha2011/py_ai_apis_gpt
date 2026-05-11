@@ -127,9 +127,9 @@ For the full 22B BF16 H100 profile, use the safer SD budget:
 }
 ```
 
-This deployment keeps one full dev LTX pipeline on GPU. Distilled and specialized modes are disabled; use `text_to_video` or `image_to_video`.
+This deployment keeps one full dev LTX pipeline on GPU. Distilled and specialized modes are disabled; use `text_to_video` or `image_to_video`. A single 20-second HD job is not supported by the full-dev-only profile; longer clips need a future chunk-and-stitch workflow that runs multiple 5-second segments.
 
-4K support on H100 is output-only upscaling. The request can use `3840x2160` for 5 seconds, but the worker records a safe native render size in job metadata:
+4K and Full HD output sizes above the native render budget are output-only upscaling. The request can use `3840x2160` for 5 seconds, but the worker records a safe native render size in job metadata:
 
 - `metadata.upscaled=true`
 - `metadata.render_width` and `metadata.render_height`: native GPU render size

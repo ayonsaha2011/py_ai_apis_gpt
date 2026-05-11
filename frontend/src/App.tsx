@@ -49,7 +49,8 @@ const modeLabels: Record<VideoMode, string> = {
 
 const resolutionPresets = [
   { label: "SD wide", width: "768", height: "448" },
-  { label: "HD wide", width: "1024", height: "576" },
+  { label: "HD render", width: "1024", height: "576" },
+  { label: "Full HD output", width: "1920", height: "1080" },
   { label: "2K wide", width: "2048", height: "1152" },
   { label: "4K UHD", width: "3840", height: "2160" },
   { label: "Square", width: "768", height: "768" },
@@ -150,42 +151,42 @@ const videoExamples: VideoExample[] = [
     negative: "blur, oversaturated colors, artificial leaf texture, frame jumps, noisy background",
   },
   {
-    title: "20s HD showroom",
+    title: "HD showroom",
     mode: "text_to_video",
     width: "1024",
     height: "576",
-    duration: "20",
-    frames: "481",
+    duration: "5",
+    frames: "121",
     steps: "36",
     cfg: "7.0",
     prompt:
-      "A 20 second HD cinematic walk-through of a modern electric vehicle showroom at night, camera gliding from the glass entrance toward a silver concept car, reflections moving across polished floors, soft ceiling panels, subtle people silhouettes in the background, realistic commercial lighting, slow continuous motion.",
+      "A cinematic HD walk-through of a modern electric vehicle showroom at night, camera gliding from the glass entrance toward a silver concept car, reflections moving across polished floors, soft ceiling panels, subtle people silhouettes in the background, realistic commercial lighting, slow continuous motion.",
     negative: "low quality, warped car body, flicker, jitter, smeared reflections, unreadable signage, duplicated wheels, fast cuts",
   },
   {
-    title: "20s HD food story",
+    title: "HD food story",
     mode: "text_to_video",
     width: "1024",
     height: "576",
-    duration: "20",
-    frames: "481",
+    duration: "5",
+    frames: "121",
     steps: "36",
     cfg: "7.0",
     prompt:
-      "A 20 second HD restaurant kitchen sequence, close camera drifting past fresh herbs, a chef plating handmade pasta, steam rising under warm lamps, sauce poured slowly, final hero plate landing on a dark stone counter, natural hand motion, shallow depth of field, premium documentary style.",
+      "An HD restaurant kitchen sequence, close camera drifting past fresh herbs, a chef plating handmade pasta, steam rising under warm lamps, sauce poured slowly, final hero plate landing on a dark stone counter, natural hand motion, shallow depth of field, premium documentary style.",
     negative: "messy hands, distorted utensils, flickering steam, overexposed highlights, warped plates, low detail food texture",
   },
   {
-    title: "20s HD travel reveal",
+    title: "HD travel reveal",
     mode: "text_to_video",
     width: "1024",
     height: "576",
-    duration: "20",
-    frames: "481",
+    duration: "5",
+    frames: "121",
     steps: "36",
     cfg: "7.0",
     prompt:
-      "A 20 second HD travel reveal at sunrise, camera starts behind linen curtains inside a quiet coastal hotel room, moves toward an open balcony, ocean waves and palm trees appear, sunlight spreads across the floor, curtains moving gently in the breeze, calm luxury resort atmosphere, smooth dolly movement.",
+      "An HD travel reveal at sunrise, camera starts behind linen curtains inside a quiet coastal hotel room, moves toward an open balcony, ocean waves and palm trees appear, sunlight spreads across the floor, curtains moving gently in the breeze, calm luxury resort atmosphere, smooth dolly movement.",
     negative: "cartoon look, harsh camera shake, warped balcony rails, noisy water, flicker, oversaturated sky, low quality fabric",
   },
 ];
@@ -210,6 +211,24 @@ function framesForDuration(duration: string) {
   return durationOptions.find((option) => option.value === duration)?.frames || "121";
 }
 
+function secondsForFrames(frames: number) {
+  return Math.max(0, Math.round(((frames - 1) / 24) * 10) / 10);
+}
+
+function fullDevFrameLimit(profile: string) {
+  const lowered = profile.toLowerCase();
+  if (lowered.includes("h200") || lowered.includes("h100")) return 121;
+  return 121;
+}
+
+function durationBlockedForProfile(option: (typeof durationOptions)[number], profile: string) {
+  return Number(option.frames) > fullDevFrameLimit(profile);
+}
+
+function durationOptionLabel(option: (typeof durationOptions)[number], profile: string) {
+  return durationBlockedForProfile(option, profile) ? `${option.label} (requires chunking)` : option.label;
+}
+
 function videoBudgetWarning(form: VideoForm, profile: string): string {
   const width = Number(form.width);
   const height = Number(form.height);
@@ -232,24 +251,27 @@ function videoBudgetWarning(form: VideoForm, profile: string): string {
     maxOutputSide = 4096;
     maxOutputPixels = 4096 * 2160;
     label = "H200 full 22B bf16";
-    guidance = "Use 5 seconds at HD or 4K upscaled output from the full dev model.";
+    guidance = "Use 5 seconds per job. 20s HD needs chunked/stitch generation, which is not enabled while the worker keeps only one full dev model on GPU.";
   } else if (h100) {
     maxPixelFrames = 768 * 448 * 121;
     maxOutputSide = 4096;
     maxOutputPixels = 4096 * 2160;
     label = "H100 full 22B bf16";
-    guidance = "Use 5 seconds at SD or 4K upscaled output from the full dev model.";
+    guidance = "Use 5 seconds per job. Longer HD output needs chunked/stitch generation, which is not enabled while the worker keeps only one full dev model on GPU.";
   }
   if (width > maxOutputSide || height > maxOutputSide) return `${label} supports output up to ${maxOutputSide}px per side.`;
   if (width * height > maxOutputPixels) return `${label} supports up to 4K output pixels.`;
+  const maxFrameLimit = Math.max(maxNativeFrames, maxUpscaledFrames);
+  if (frames > maxFrameLimit) {
+    return `${label} admits up to ${maxFrameLimit} frames, about ${secondsForFrames(maxFrameLimit)}s at 24 fps. You selected ${frames} frames, about ${secondsForFrames(frames)}s. ${guidance}`;
+  }
   const nativeRequest = width <= maxNativeSide && height <= maxNativeSide && frames <= maxNativeFrames && width * height * frames <= maxPixelFrames;
-  if (!nativeRequest && frames > maxUpscaledFrames) return `${label} 4K/upscaled output allows ${maxUpscaledFrames} frames here. ${guidance}`;
   if (!nativeRequest && maxOutputSide <= maxNativeSide) return `${label} memory budget is exceeded. ${guidance}`;
   return "";
 }
 
 function videoGenerationMode(form: VideoForm, profile: string): string {
-  return videoBudgetWarning(form, profile) ? "Blocked" : isUpscaledOutput(form, profile) ? "4K upscale" : "Native";
+  return videoBudgetWarning(form, profile) ? "Blocked" : isUpscaledOutput(form, profile) ? "Upscaled output" : "Native";
 }
 
 function isUpscaledOutput(form: VideoForm, profile: string): boolean {
@@ -756,6 +778,13 @@ function VideoPage({
   const budgetWarning = videoBudgetWarning(form, profile);
   const generationMode = videoGenerationMode(form, profile);
 
+  useEffect(() => {
+    const option = durationOptions.find((item) => item.value === form.duration);
+    if (option && durationBlockedForProfile(option, profile)) {
+      setForm((current) => ({ ...current, duration: "5", frames: "121" }));
+    }
+  }, [form.duration, profile]);
+
   function patch<K extends keyof VideoForm>(key: K, value: VideoForm[K]) {
     setForm((current) => ({ ...current, [key]: value }));
   }
@@ -926,7 +955,7 @@ function VideoPage({
               </div>
               <div className="rounded-md border border-line bg-slate-50 px-3 py-2 text-sm font-semibold text-muted">
                 Output mode: <span className="text-ink">{generationMode}</span>
-                {generationMode === "4K upscale" ? <span className="text-muted"> from the safe native GPU budget.</span> : null}
+                {generationMode === "Upscaled output" ? <span className="text-muted"> from the safe native GPU budget.</span> : null}
               </div>
             </div>
 
@@ -937,8 +966,8 @@ function VideoPage({
                 Duration
                 <select className="input" value={form.duration} onChange={(event) => setDuration(event.target.value)}>
                   {durationOptions.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
+                    <option key={option.value} value={option.value} disabled={durationBlockedForProfile(option, profile)}>
+                      {durationOptionLabel(option, profile)}
                     </option>
                   ))}
                 </select>

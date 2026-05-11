@@ -33,7 +33,7 @@ pub fn validate_video_request(req: &VideoJobRequest, profile: &str) -> Result<()
     if req.width % 32 != 0 || req.height % 32 != 0 {
         if !upscaled_request || req.width % 2 != 0 || req.height % 2 != 0 {
             return Err(AppError::BadRequest(
-                "width and height must be divisible by 32 for native generation, or even for 4K upscaled output".into(),
+                "width and height must be divisible by 32 for native generation, or even for upscaled output".into(),
             ));
         }
     }
@@ -58,9 +58,11 @@ pub fn validate_video_request(req: &VideoJobRequest, profile: &str) -> Result<()
     }
     let max_frame_limit = budget.max_frames.max(budget.max_upscaled_frames);
     if req.num_frames > max_frame_limit {
+        let requested_seconds = frame_seconds(req.num_frames, req.frame_rate);
+        let allowed_seconds = frame_seconds(max_frame_limit, req.frame_rate);
         return Err(AppError::BadRequest(format!(
-            "num_frames exceeds {} for {}; {}",
-            max_frame_limit, budget.label, budget.guidance
+            "num_frames exceeds {max_frame_limit} for {}; requested {} frames (~{requested_seconds:.1}s), allowed {max_frame_limit} frames (~{allowed_seconds:.1}s). {}",
+            budget.label, req.num_frames, budget.guidance
         )));
     }
     if !native_request {
@@ -144,7 +146,7 @@ fn ltx_budget(profile: &str) -> LtxBudget {
             max_upscaled_frames: 121,
             label: "H200 full 22B bf16 LTX",
             guidance:
-                "use 5 seconds at 1024x576 for full 22B bf16, or reduce resolution for longer clips",
+                "use 5 seconds at 1024x576 per job; 20s HD requires chunked/stitch generation, which is not enabled while the worker keeps only one full dev model on GPU",
         };
     }
     if h100 {
@@ -156,7 +158,7 @@ fn ltx_budget(profile: &str) -> LtxBudget {
             max_output_pixels: 4096 * 2160,
             max_upscaled_frames: 121,
             label: "H100 full 22B bf16 LTX",
-            guidance: "use 5 seconds at 768x448 for full 22B bf16, or use H200 for larger clips",
+            guidance: "use 5 seconds at 768x448 per job, or use H200 for larger 5-second jobs",
         };
     }
     LtxBudget {
@@ -167,8 +169,13 @@ fn ltx_budget(profile: &str) -> LtxBudget {
         max_output_pixels: 1024 * 1024,
         max_upscaled_frames: 121,
         label: "local full 22B LTX",
-        guidance: "use 5 seconds at 768x448, or switch to the H200 profile for larger jobs",
+        guidance: "use 5 seconds at 768x448, or switch to the H200 profile for larger 5-second jobs",
     }
+}
+
+fn frame_seconds(frames: u32, frame_rate: Option<f32>) -> f32 {
+    let fps = frame_rate.unwrap_or(24.0).max(1.0);
+    frames.saturating_sub(1) as f32 / fps
 }
 
 pub fn effective_seed(user_id: &str, job_id: &Uuid, seed_hint: Option<u64>, prompt: &str) -> i64 {

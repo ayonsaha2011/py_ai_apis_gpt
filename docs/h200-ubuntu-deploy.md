@@ -57,9 +57,9 @@ After `git pull`, restart the gateway to pick up Rust gateway changes. The H200 
 bash scripts/deploy_h200.sh restart gateway
 ```
 
-For full 22B BF16 H200 text-to-video, the gateway admits 5-second HD jobs at `1024x576` and `121` frames. The LTX worker keeps one full dev pipeline on GPU, so distilled and specialized modes are rejected before GPU allocation.
+For full 22B BF16 H200 text-to-video, the gateway admits 5-second HD jobs at `1024x576` and `121` frames. The LTX worker keeps one full dev pipeline on GPU, so distilled and specialized modes are rejected before GPU allocation. A single 20-second HD job is not supported by this full-dev-only profile; it needs a future chunk-and-stitch workflow that runs multiple 5-second segments and joins them after generation.
 
-4K is supported as output-only upscaling for 5-second jobs. The API response and history include `metadata.upscaled`, `render_width`, `render_height`, `output_width`, and `output_height` so operators can distinguish native render cost from final artifact size.
+4K and Full HD output sizes above the native render budget are supported as output-only upscaling for 5-second jobs. The API response and history include `metadata.upscaled`, `render_width`, `render_height`, `output_width`, and `output_height` so operators can distinguish native render cost from final artifact size.
 
 Systemd units are shared with the H100 path:
 

@@ -106,7 +106,7 @@ def validate_ltx_budget(req: VideoRequest) -> None:
     if req.width % 32 != 0 or req.height % 32 != 0:
         if not upscaled_request or req.width % 2 != 0 or req.height % 2 != 0:
             raise ValueError(
-                "width and height must be divisible by 32 for native generation, or even for 4K upscaled output"
+                "width and height must be divisible by 32 for native generation, or even for upscaled output"
             )
     if req.width > budget["max_output_side"] or req.height > budget["max_output_side"]:
         raise ValueError(f"width/height exceed 4K output limit {budget['max_output_side']}")
@@ -115,7 +115,13 @@ def validate_ltx_budget(req: VideoRequest) -> None:
         raise ValueError(f"width/height exceed 4K output pixel limit {budget['max_output_pixels']}")
     max_frame_limit = max(budget["max_frames"], budget["max_upscaled_frames"])
     if req.num_frames > max_frame_limit:
-        raise ValueError(f"num_frames exceeds {max_frame_limit} for {budget['label']}; {budget['guidance']}")
+        requested_seconds = _frame_seconds(req.num_frames, req.frame_rate)
+        allowed_seconds = _frame_seconds(max_frame_limit, req.frame_rate)
+        raise ValueError(
+            f"num_frames exceeds {max_frame_limit} for {budget['label']}; "
+            f"requested {req.num_frames} frames (~{requested_seconds:.1f}s), "
+            f"allowed {max_frame_limit} frames (~{allowed_seconds:.1f}s). {budget['guidance']}"
+        )
     pixel_frames = req.width * req.height * req.num_frames
     if not native_request and (
         req.num_frames > budget["max_upscaled_frames"] or budget["max_output_side"] <= budget["max_native_side"]
@@ -138,7 +144,7 @@ def _ltx_budget(req: VideoRequest) -> dict[str, Any]:
             "max_output_pixels": 4096 * 2160,
             "max_upscaled_frames": 121,
             "label": "H200 full 22B bf16 LTX",
-            "guidance": "use 5 seconds at 1024x576 for full 22B bf16, or reduce resolution for longer clips",
+            "guidance": "use 5 seconds at 1024x576 per job; 20s HD requires chunked/stitch generation, which is not enabled while the worker keeps only one full dev model on GPU",
         }
     if h100:
         return {
@@ -149,7 +155,7 @@ def _ltx_budget(req: VideoRequest) -> dict[str, Any]:
             "max_output_pixels": 4096 * 2160,
             "max_upscaled_frames": 121,
             "label": "H100 full 22B bf16 LTX",
-            "guidance": "use 5 seconds at 768x448 for full 22B bf16, or use H200 for larger clips",
+            "guidance": "use 5 seconds at 768x448 per job, or use H200 for larger 5-second jobs",
         }
     return {
         "max_native_side": 1024,
@@ -159,8 +165,13 @@ def _ltx_budget(req: VideoRequest) -> dict[str, Any]:
         "max_output_pixels": 1024 * 1024,
         "max_upscaled_frames": 121,
         "label": "local full 22B LTX",
-        "guidance": "use 5 seconds at 768x448, or switch to the H200 profile for larger jobs",
+        "guidance": "use 5 seconds at 768x448, or switch to the H200 profile for larger 5-second jobs",
     }
+
+
+def _frame_seconds(frames: int, frame_rate: float | None) -> float:
+    fps = max(frame_rate or 24.0, 1.0)
+    return max(frames - 1, 0) / fps
 
 
 def _native_request_fits(req: VideoRequest, budget: dict[str, Any]) -> bool:
@@ -306,7 +317,7 @@ def _upscale_video(input_path: Path, output_path: Path, width: int, height: int)
     ]
     result = subprocess.run(cmd, capture_output=True, text=True, check=False)
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg 4K upscale failed: {result.stderr[-2000:]}")
+        raise RuntimeError(f"ffmpeg upscale failed: {result.stderr[-2000:]}")
 
 
 def _image_conditionings(req: VideoRequest) -> list[Any]:
