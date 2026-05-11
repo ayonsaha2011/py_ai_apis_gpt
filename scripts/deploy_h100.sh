@@ -236,7 +236,7 @@ install_pytorch_if_requested() {
 install_python_deps() {
   info "Installing Python dependencies without replacing system CUDA PyTorch..."
   "$VENV_DIR/bin/python" -m pip install -r "$ROOT_DIR/infra/requirements-h100-system.txt"
-  ensure_huggingface_cli
+  ensure_huggingface_download_deps
 }
 
 hf_cli_path() {
@@ -260,6 +260,7 @@ hf_cli_path() {
 }
 
 ensure_huggingface_cli() {
+  ensure_huggingface_download_deps
   local cli
   if cli="$(hf_cli_path)"; then
     info "Hugging Face CLI available: $cli"
@@ -267,17 +268,74 @@ ensure_huggingface_cli() {
     return
   fi
   info "Installing Hugging Face CLI into $VENV_DIR..."
-  "$VENV_DIR/bin/python" -m pip install "huggingface_hub[cli]>=0.30"
+  "$VENV_DIR/bin/python" -m pip install "huggingface_hub[cli]>=0.30,<1.0" "hf_transfer>=0.1.9"
+  ensure_huggingface_download_deps
   cli="$(hf_cli_path)" || fail "huggingface-cli/hf was not found after installing huggingface_hub[cli]"
   "$cli" --help >/dev/null 2>&1 || fail "Hugging Face CLI installed at $cli but failed to run"
   info "Hugging Face CLI ready: $cli"
 }
 
 check_huggingface_cli() {
+  ensure_huggingface_download_deps
   local cli
-  cli="$(hf_cli_path)" || fail "Missing Hugging Face CLI. Run deploy/setup, or install it with: $VENV_DIR/bin/python -m pip install 'huggingface_hub[cli]>=0.30'"
+  cli="$(hf_cli_path)" || fail "Missing Hugging Face CLI. Run deploy/setup, or install it with: $VENV_DIR/bin/python -m pip install 'huggingface_hub[cli]>=0.30,<1.0' 'hf_transfer>=0.1.9'"
   "$cli" --help >/dev/null 2>&1 || fail "Hugging Face CLI exists at $cli but failed to run"
   info "Hugging Face CLI OK: $cli"
+}
+
+ensure_huggingface_download_deps() {
+  local status
+  set +e
+  "$VENV_DIR/bin/python" - <<'PY'
+import importlib.metadata
+import importlib.util
+import os
+import sys
+
+try:
+    version = importlib.metadata.version("huggingface_hub")
+except importlib.metadata.PackageNotFoundError:
+    raise SystemExit(10)
+
+major = int(version.split(".", 1)[0])
+if major >= 1:
+    raise SystemExit(11)
+
+if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1" and importlib.util.find_spec("hf_transfer") is None:
+    raise SystemExit(12)
+
+raise SystemExit(0)
+PY
+  status=$?
+  set -e
+  case "$status" in
+    0) return ;;
+    10)
+      info "Installing Hugging Face Hub download dependencies into $VENV_DIR..."
+      ;;
+    11)
+      warn "huggingface_hub>=1 is installed in $VENV_DIR; installing transformers-compatible huggingface_hub<1."
+      ;;
+    12)
+      info "HF_HUB_ENABLE_HF_TRANSFER=1; installing hf_transfer into $VENV_DIR..."
+      ;;
+    *)
+      fail "Could not inspect Hugging Face download dependencies in $VENV_DIR"
+      ;;
+  esac
+  "$VENV_DIR/bin/python" -m pip install "huggingface_hub[cli]>=0.30,<1.0" "hf_transfer>=0.1.9"
+  "$VENV_DIR/bin/python" - <<'PY'
+import importlib.util
+import os
+import huggingface_hub
+
+major = int(huggingface_hub.__version__.split(".", 1)[0])
+if major >= 1:
+    raise SystemExit(f"huggingface_hub<1 required, got {huggingface_hub.__version__}")
+if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1" and importlib.util.find_spec("hf_transfer") is None:
+    raise SystemExit("HF_HUB_ENABLE_HF_TRANSFER=1 but hf_transfer is still unavailable")
+print(f"huggingface_hub={huggingface_hub.__version__}")
+PY
 }
 
 download_models() {

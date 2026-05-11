@@ -39,10 +39,13 @@ Option 3: login from the deployment venv:
 
 ```bash
 /workspace/py_ai_apis_gpt/.venv-h200/bin/huggingface-cli login
+# Newer Hugging Face CLI also supports:
+/workspace/py_ai_apis_gpt/.venv-h200/bin/hf auth login
 bash scripts/deploy_h200.sh deploy
 ```
 
 The token account must have accepted access for `google/gemma-3-12b-it-qat-q4_0-unquantized`. If `HF_TOKEN` in `.env.h200` is still a placeholder, either replace it or remove that line before using CLI login.
+The deploy script installs `huggingface_hub[cli]` and `hf_transfer` before model downloads, including when `HF_HUB_ENABLE_HF_TRANSFER=1`.
 
 For a local smoke run, use `TURSO_DB_URL=file:storage/gateway.db`. For production Turso, set both `TURSO_DB_URL=libsql://...` and `TURSO_AUTH_TOKEN=...`; placeholders are rejected before services start.
 

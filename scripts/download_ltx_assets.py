@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
+import importlib.util
 import os
 import shutil
+import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -16,6 +20,7 @@ LTX_ALLOW = [
 
 DEFAULT_TEXT_MODEL_ID = "google/gemma-3-12b-it-qat-q4_0-unquantized"
 BYTES_PER_GB = 1024**3
+HF_PACKAGES = ["huggingface_hub[cli]>=0.30,<1.0", "hf_transfer>=0.1.9"]
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,7 @@ def add_unique(specs: list[DownloadSpec], spec: DownloadSpec) -> None:
 
 
 def download_snapshot(spec: DownloadSpec, cache_dir: Path | None, max_workers: int) -> None:
+    ensure_hf_dependencies()
     from huggingface_hub import snapshot_download
 
     spec.local_dir.mkdir(parents=True, exist_ok=True)
@@ -102,6 +108,7 @@ def hf_token() -> str | None:
 
 
 def preflight_repo_access(specs: list[DownloadSpec]) -> None:
+    ensure_hf_dependencies()
     from huggingface_hub import HfApi
     from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
 
@@ -129,8 +136,52 @@ def _gated_repo_message(repo_id: str) -> str:
         "       HF_TOKEN=hf_your_read_token\n"
         "     or login on the server with:\n"
         "       huggingface-cli login\n"
+        "     or, with newer Hugging Face CLI:\n"
+        "       hf auth login\n"
         "  3. Re-run the deploy command.\n"
     )
+
+
+def ensure_hf_dependencies() -> None:
+    needs_install = False
+    reason = ""
+    try:
+        version = importlib.metadata.version("huggingface_hub")
+    except importlib.metadata.PackageNotFoundError:
+        needs_install = True
+        reason = "huggingface_hub is not installed"
+    else:
+        try:
+            major = int(version.split(".", 1)[0])
+        except ValueError:
+            major = 0
+        if major >= 1:
+            needs_install = True
+            reason = f"huggingface_hub<1 is required by the deployment stack, found {version}"
+
+    if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1" and importlib.util.find_spec("hf_transfer") is None:
+        needs_install = True
+        reason = "HF_HUB_ENABLE_HF_TRANSFER=1 but hf_transfer is not installed"
+
+    if not needs_install:
+        return
+
+    print(f"Installing Hugging Face download dependencies because {reason}...", flush=True)
+    try:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", *HF_PACKAGES])
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(
+            "Failed to install Hugging Face download dependencies. Run manually:\n"
+            f"  {sys.executable} -m pip install " + " ".join(repr(pkg) for pkg in HF_PACKAGES)
+        ) from exc
+
+    import huggingface_hub
+
+    major = int(huggingface_hub.__version__.split(".", 1)[0])
+    if major >= 1:
+        raise SystemExit(f"huggingface_hub<1 is required, got {huggingface_hub.__version__}")
+    if os.environ.get("HF_HUB_ENABLE_HF_TRANSFER") == "1" and importlib.util.find_spec("hf_transfer") is None:
+        raise SystemExit("HF_HUB_ENABLE_HF_TRANSFER=1 but hf_transfer is still unavailable after install")
 
 
 def main() -> None:
