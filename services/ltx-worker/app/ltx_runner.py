@@ -312,21 +312,22 @@ def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> t
         _token_count(req.width, req.height, req.num_frames),
     )
 
-    video, audio = pipeline(
-        prompt=req.prompt,
-        negative_prompt=req.negative_prompt or "",
-        seed=seed,
-        height=req.height,
-        width=req.width,
-        num_frames=req.num_frames,
-        frame_rate=fps,
-        num_inference_steps=req.num_inference_steps or 40,
-        video_guider_params=MultiModalGuiderParams(cfg_scale=req.guidance_scale or 7.5),
-        audio_guider_params=MultiModalGuiderParams(),
-        images=images,
-        tiling_config=tiling,
-        enhance_prompt=bool(req.enhance_prompt),
-    )
+    with torch.no_grad():
+        video, audio = pipeline(
+            prompt=req.prompt,
+            negative_prompt=req.negative_prompt or "",
+            seed=seed,
+            height=req.height,
+            width=req.width,
+            num_frames=req.num_frames,
+            frame_rate=fps,
+            num_inference_steps=req.num_inference_steps or 40,
+            video_guider_params=MultiModalGuiderParams(cfg_scale=req.guidance_scale or 7.5),
+            audio_guider_params=MultiModalGuiderParams(),
+            images=images,
+            tiling_config=tiling,
+            enhance_prompt=bool(req.enhance_prompt),
+        )
 
     chunks = get_video_chunks_number(req.num_frames, tiling)
     encode_video(
