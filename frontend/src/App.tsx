@@ -49,10 +49,9 @@ const modeLabels: Record<VideoMode, string> = {
 
 const resolutionPresets = [
   { label: "SD wide", width: "768", height: "448" },
-  { label: "HD render", width: "1024", height: "576" },
-  { label: "Full HD output", width: "1920", height: "1080" },
-  { label: "2K wide", width: "2048", height: "1152" },
-  { label: "4K UHD", width: "3840", height: "2160" },
+  { label: "HD", width: "1024", height: "576" },
+  { label: "H200 20s", width: "1408", height: "768" },
+  { label: "Full-HD 5s", width: "1920", height: "1088" },
   { label: "Square", width: "768", height: "768" },
   { label: "Portrait", width: "576", height: "1024" },
 ];
@@ -189,6 +188,32 @@ const videoExamples: VideoExample[] = [
       "An HD travel reveal at sunrise, camera starts behind linen curtains inside a quiet coastal hotel room, moves toward an open balcony, ocean waves and palm trees appear, sunlight spreads across the floor, curtains moving gently in the breeze, calm luxury resort atmosphere, smooth dolly movement.",
     negative: "cartoon look, harsh camera shake, warped balcony rails, noisy water, flicker, oversaturated sky, low quality fabric",
   },
+  {
+    title: "H200 20s scene",
+    mode: "text_to_video",
+    width: "1408",
+    height: "768",
+    duration: "20",
+    frames: "481",
+    steps: "40",
+    cfg: "7.5",
+    prompt:
+      "A long continuous shot following a lone hiker through a misty mountain forest at dawn, sunlight breaking through pine trees, light fog rolling across the trail, slow steady tracking camera behind the figure, realistic footstep motion, natural ambient light shifting as clouds move, cinematic depth.",
+    negative: "camera shake, fast cuts, warped trees, overexposed sky, ghosting, motion blur artifacts, cartoon",
+  },
+  {
+    title: "Full-HD 5s reveal",
+    mode: "text_to_video",
+    width: "1920",
+    height: "1088",
+    duration: "5",
+    frames: "121",
+    steps: "40",
+    cfg: "7.5",
+    prompt:
+      "A cinematic full-HD opening shot of a luxury penthouse living room at golden hour, camera slowly pushing in from the floor-to-ceiling window toward a glass coffee table, city skyline behind, warm diffused light on polished concrete floors, minimal furniture, no people, ultra-realistic materials.",
+    negative: "low detail, flicker, warped reflections, cartoon furniture, oversaturated sky, fast camera, jitter",
+  },
 ];
 
 function savedConfig(): Config {
@@ -211,22 +236,35 @@ function framesForDuration(duration: string) {
   return durationOptions.find((option) => option.value === duration)?.frames || "121";
 }
 
-function secondsForFrames(frames: number) {
-  return Math.max(0, Math.round(((frames - 1) / 24) * 10) / 10);
+
+function _tokenCount(width: number, height: number, frames: number): number {
+  return (Math.floor((frames - 1) / 8) + 1) * Math.floor(height / 8) * Math.floor(width / 8);
 }
 
-function fullDevFrameLimit(profile: string) {
-  const lowered = profile.toLowerCase();
-  if (lowered.includes("h200") || lowered.includes("h100")) return 121;
-  return 121;
+function _maxTokens(profile: string): number {
+  const p = profile.toLowerCase();
+  if (p.includes("b200")) return 2_580_000;
+  if (p.includes("h200")) return 1_770_000;
+  if (p.includes("h100")) return 540_000;
+  return 140_000;
 }
 
-function durationBlockedForProfile(option: (typeof durationOptions)[number], profile: string) {
-  return Number(option.frames) > fullDevFrameLimit(profile);
+function _suggestNative(frames: number, cap: number): [number, number] {
+  const fFactor = Math.floor((frames - 1) / 8) + 1;
+  for (let w = 3840; w >= 128; w -= 32) {
+    const h = Math.round((w * 9) / 16 / 32) * 32;
+    if (h < 128) continue;
+    if (fFactor * Math.floor(h / 8) * Math.floor(w / 8) <= cap) return [w, h];
+  }
+  return [256, 144];
 }
 
-function durationOptionLabel(option: (typeof durationOptions)[number], profile: string) {
-  return durationBlockedForProfile(option, profile) ? `${option.label} (requires chunking)` : option.label;
+function durationBlockedForProfile(_option: (typeof durationOptions)[number], _profile: string): boolean {
+  return false;
+}
+
+function durationOptionLabel(option: (typeof durationOptions)[number], _profile: string): string {
+  return option.label;
 }
 
 function videoBudgetWarning(form: VideoForm, profile: string): string {
@@ -234,66 +272,25 @@ function videoBudgetWarning(form: VideoForm, profile: string): string {
   const height = Number(form.height);
   const frames = Number(form.frames);
   if (!Number.isFinite(width) || !Number.isFinite(height) || !Number.isFinite(frames)) return "";
-  const lowered = profile.toLowerCase();
-  const h200 = lowered.includes("h200");
-  const h100 = lowered.includes("h100");
-  let maxNativeFrames = 121;
-  let maxUpscaledFrames = 121;
-  let maxPixelFrames = 768 * 448 * 121;
-  let maxNativeSide = 1024;
-  let maxOutputSide = 1024;
-  let maxOutputPixels = 1024 * 1024;
-  let label = "local full 22B";
-  let guidance = "Use 5 seconds at 768x448, or select a cloud profile for larger jobs.";
-  if (h200) {
-    maxPixelFrames = 1024 * 576 * 121;
-    maxNativeSide = 1536;
-    maxOutputSide = 4096;
-    maxOutputPixels = 4096 * 2160;
-    label = "H200 full 22B bf16";
-    guidance = "Use 5 seconds per job. 20s HD needs chunked/stitch generation, which is not enabled while the worker keeps only one full dev model on GPU.";
-  } else if (h100) {
-    maxPixelFrames = 768 * 448 * 121;
-    maxOutputSide = 4096;
-    maxOutputPixels = 4096 * 2160;
-    label = "H100 full 22B bf16";
-    guidance = "Use 5 seconds per job. Longer HD output needs chunked/stitch generation, which is not enabled while the worker keeps only one full dev model on GPU.";
+  const tokens = _tokenCount(width, height, frames);
+  const cap = _maxTokens(profile);
+  if (tokens > cap) {
+    const [sw, sh] = _suggestNative(frames, cap);
+    return `${width}×${height}@${frames}f exceeds ${profile || "GPU"} capacity (${tokens.toLocaleString()} > ${cap.toLocaleString()} tokens). Suggested: ${sw}×${sh}@${frames}f`;
   }
-  if (width > maxOutputSide || height > maxOutputSide) return `${label} supports output up to ${maxOutputSide}px per side.`;
-  if (width * height > maxOutputPixels) return `${label} supports up to 4K output pixels.`;
-  const maxFrameLimit = Math.max(maxNativeFrames, maxUpscaledFrames);
-  if (frames > maxFrameLimit) {
-    return `${label} admits up to ${maxFrameLimit} frames, about ${secondsForFrames(maxFrameLimit)}s at 24 fps. You selected ${frames} frames, about ${secondsForFrames(frames)}s. ${guidance}`;
-  }
-  const nativeRequest = width <= maxNativeSide && height <= maxNativeSide && frames <= maxNativeFrames && width * height * frames <= maxPixelFrames;
-  if (!nativeRequest && maxOutputSide <= maxNativeSide) return `${label} memory budget is exceeded. ${guidance}`;
   return "";
 }
 
 function videoGenerationMode(form: VideoForm, profile: string): string {
-  return videoBudgetWarning(form, profile) ? "Blocked" : isUpscaledOutput(form, profile) ? "Upscaled output" : "Native";
+  return videoBudgetWarning(form, profile) ? "Blocked" : "Native";
 }
 
-function isUpscaledOutput(form: VideoForm, profile: string): boolean {
-  const width = Number(form.width);
-  const height = Number(form.height);
-  const frames = Number(form.frames);
-  const lowered = profile.toLowerCase();
-  const h200 = lowered.includes("h200");
-  const h100 = lowered.includes("h100");
-  let maxNativeSide = h200 ? 1536 : 1024;
-  let maxNativeFrames = 121;
-  let maxPixelFrames = h200 ? 1024 * 576 * maxNativeFrames : 768 * 448 * 121;
-  if (h100) maxPixelFrames = 768 * 448 * 121;
-  if (!h100 && !h200) return false;
-  return width > maxNativeSide || height > maxNativeSide || width * height * frames > maxPixelFrames;
-}
 
-function videoSizeValid(form: VideoForm, profile: string): boolean {
+function videoSizeValid(form: VideoForm, _profile: string): boolean {
   const width = Number(form.width);
   const height = Number(form.height);
   if (!Number.isFinite(width) || !Number.isFinite(height)) return false;
-  return (width % 32 === 0 && height % 32 === 0) || (isUpscaledOutput(form, profile) && width % 2 === 0 && height % 2 === 0);
+  return width % 32 === 0 && height % 32 === 0;
 }
 
 function App() {
@@ -955,7 +952,6 @@ function VideoPage({
               </div>
               <div className="rounded-md border border-line bg-slate-50 px-3 py-2 text-sm font-semibold text-muted">
                 Output mode: <span className="text-ink">{generationMode}</span>
-                {generationMode === "Upscaled output" ? <span className="text-muted"> from the safe native GPU budget.</span> : null}
               </div>
             </div>
 
