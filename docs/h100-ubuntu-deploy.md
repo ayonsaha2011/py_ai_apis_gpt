@@ -127,7 +127,7 @@ For the full 22B BF16 H100 profile, use the safer SD budget:
 }
 ```
 
-This deployment keeps one full dev LTX pipeline on GPU. Distilled and specialized modes are disabled; use `text_to_video` or `image_to_video`. A single 20-second HD job is not supported by the full-dev-only profile; longer clips need a future chunk-and-stitch workflow that runs multiple 5-second segments.
+This deployment preloads one full dev LTX pipeline on service startup and reuses that singleton for all video jobs in the worker process. Distilled and specialized modes are disabled; use `text_to_video` or `image_to_video`. The text worker stays on CUDA and fails fast if CUDA is unavailable. Single-H100 full LTX plus Gemma co-residency is not a supported memory target; use `TEXT_DEVICE=cuda:1` or a separate GPU text host when LTX owns `cuda:0`. The selected Gemma QAT repository publishes an unquantized checkpoint, so the custom PyTorch text worker loads BF16-sized weights unless a separate GPU quantization path is added.
 
 4K and Full HD output sizes above the native render budget are output-only upscaling. The request can use `3840x2160` for 5 seconds, but the worker records a safe native render size in job metadata:
 

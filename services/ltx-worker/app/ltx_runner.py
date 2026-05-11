@@ -4,6 +4,7 @@ import asyncio
 import gc
 import logging
 import os
+import threading
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -24,6 +25,7 @@ OVERHEAD_BYTES = 12 * 1024**3
 SAFETY_BYTES = 6 * 1024**3
 
 _PRECISION_READY = False
+_PIPELINE_LOAD_LOCK = threading.Lock()
 
 
 def _files() -> dict[str, str]:
@@ -84,6 +86,8 @@ def runtime_status() -> dict[str, Any]:
         "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
         "pipeline_one_stage_built": _one_stage_pipeline.cache_info().currsize > 0,
         "pipeline_two_stage_built": _two_stage_pipeline.cache_info().currsize > 0,
+        "singleton_pipeline": "one_stage_full_dev",
+        "preload_on_start": settings.preload_on_start,
         "max_num_frames": settings.max_num_frames,
         "max_tokens": _max_tokens(),
     }
@@ -135,7 +139,12 @@ def _token_count(width: int, height: int, num_frames: int) -> int:
 
 
 def _required_bytes(tokens: int) -> int:
-    return WEIGHT_BYTES + tokens * PER_TOKEN_ACT_BYTES + OVERHEAD_BYTES
+    weight_bytes = 0 if _single_pipeline_loaded() else WEIGHT_BYTES
+    return weight_bytes + tokens * PER_TOKEN_ACT_BYTES + OVERHEAD_BYTES
+
+
+def _single_pipeline_loaded() -> bool:
+    return _one_stage_pipeline.cache_info().currsize > 0
 
 
 def _suggest_native(num_frames: int, cap: int, aspect: float = 16 / 9) -> tuple[int, int]:
@@ -225,6 +234,20 @@ def validate_ltx_budget(req: VideoRequest) -> None:
             )
 
 
+def preload_ltx_models() -> dict[str, Any]:
+    ensure_runtime_ready()
+    pipeline, pipeline_kind = _select_pipeline()
+    status = runtime_status()
+    logger.info(
+        "LTX singleton pipeline ready pipeline=%s loaded=%s gpu_free_gib=%s gpu_total_gib=%s",
+        pipeline_kind,
+        pipeline is not None,
+        status["vram_free_gib"],
+        status["vram_total_gib"],
+    )
+    return {"pipeline": pipeline_kind, "runtime": status}
+
+
 @lru_cache(maxsize=1)
 def _two_stage_pipeline() -> Any:
     from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
@@ -248,6 +271,13 @@ def _two_stage_pipeline() -> Any:
 def _one_stage_pipeline() -> Any:
     from ltx_pipelines.ti2vid_one_stage import TI2VidOneStagePipeline
 
+    logger.info(
+        "loading singleton LTX full dev one-stage pipeline checkpoint=%s gemma_root=%s quantization=%s device=%s",
+        _pick("ltx-2.3-22b-dev.safetensors"),
+        _gemma_root(),
+        settings.quantization,
+        settings.cuda_device,
+    )
     return TI2VidOneStagePipeline(
         checkpoint_path=_pick("ltx-2.3-22b-dev.safetensors"),
         gemma_root=_gemma_root(),
@@ -267,9 +297,13 @@ def _use_one_stage(_req: VideoRequest) -> bool:
     return True
 
 
-def _select_pipeline(_req: VideoRequest) -> tuple[Any, str]:
-    _two_stage_pipeline.cache_clear()
-    return _one_stage_pipeline(), "one_stage"
+def _select_pipeline(_req: VideoRequest | None = None) -> tuple[Any, str]:
+    return _singleton_one_stage_pipeline(), "one_stage"
+
+
+def _singleton_one_stage_pipeline() -> Any:
+    with _PIPELINE_LOAD_LOCK:
+        return _one_stage_pipeline()
 
 
 def _tiling_for(width: int, height: int, frames: int) -> Any:
@@ -279,13 +313,13 @@ def _tiling_for(width: int, height: int, frames: int) -> Any:
     pixels = width * height * frames
     if pixels > 200_000_000:
         return TilingConfig(
-            spatial_config=SpatialTilingConfig(tile_size_in_pixels=384, tile_overlap_in_pixels=64),
-            temporal_config=TemporalTilingConfig(tile_size_in_frames=32, tile_overlap_in_frames=8),
+            spatial_config=SpatialTilingConfig(tile_size_in_pixels=256, tile_overlap_in_pixels=64),
+            temporal_config=TemporalTilingConfig(tile_size_in_frames=24, tile_overlap_in_frames=8),
         )
     if pixels > 60_000_000:
         return TilingConfig(
-            spatial_config=SpatialTilingConfig(tile_size_in_pixels=448, tile_overlap_in_pixels=64),
-            temporal_config=TemporalTilingConfig(tile_size_in_frames=48, tile_overlap_in_frames=16),
+            spatial_config=SpatialTilingConfig(tile_size_in_pixels=320, tile_overlap_in_pixels=64),
+            temporal_config=TemporalTilingConfig(tile_size_in_frames=24, tile_overlap_in_frames=8),
         )
     return TilingConfig.default()
 
@@ -312,31 +346,52 @@ def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> t
         _token_count(req.width, req.height, req.num_frames),
     )
 
-    with torch.no_grad():
-        video, audio = pipeline(
-            prompt=req.prompt,
-            negative_prompt=req.negative_prompt or "",
-            seed=seed,
-            height=req.height,
-            width=req.width,
-            num_frames=req.num_frames,
-            frame_rate=fps,
-            num_inference_steps=req.num_inference_steps or 40,
-            video_guider_params=MultiModalGuiderParams(cfg_scale=req.guidance_scale or 7.5),
-            audio_guider_params=MultiModalGuiderParams(),
-            images=images,
-            tiling_config=tiling,
-            enhance_prompt=bool(req.enhance_prompt),
-        )
+    try:
+        with torch.inference_mode():
+            video, audio = pipeline(
+                prompt=req.prompt,
+                negative_prompt=req.negative_prompt or "",
+                seed=seed,
+                height=req.height,
+                width=req.width,
+                num_frames=req.num_frames,
+                frame_rate=fps,
+                num_inference_steps=req.num_inference_steps or 40,
+                video_guider_params=MultiModalGuiderParams(cfg_scale=req.guidance_scale or 7.5),
+                audio_guider_params=MultiModalGuiderParams(),
+                images=images,
+                tiling_config=tiling,
+                enhance_prompt=bool(req.enhance_prompt),
+            )
 
-    chunks = get_video_chunks_number(req.num_frames, tiling)
-    encode_video(
-        video=video,
-        fps=int(fps),
-        audio=audio,
-        output_path=str(output_path),
-        video_chunks_number=chunks,
-    )
+        release_cuda_memory()
+        if torch.cuda.is_available():
+            try:
+                free, total = torch.cuda.mem_get_info(_device())
+                logger.info(
+                    "ltx_runner job=%s pre_encode_free_gib=%.2f total_gib=%.2f",
+                    job_id,
+                    free / 1024**3,
+                    total / 1024**3,
+                )
+            except RuntimeError:
+                logger.debug("ltx_runner job=%s could not read pre-encode CUDA memory", job_id, exc_info=True)
+
+        chunks = get_video_chunks_number(req.num_frames, tiling)
+        encode_video(
+            video=video,
+            fps=int(fps),
+            audio=audio,
+            output_path=str(output_path),
+            video_chunks_number=chunks,
+        )
+    finally:
+        if "video" in locals():
+            del video
+        if "audio" in locals():
+            del audio
+        release_cuda_memory()
+
     metadata = {
         "pipeline": pipeline_kind,
         "render_width": req.width,

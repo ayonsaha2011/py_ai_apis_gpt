@@ -85,6 +85,14 @@ load_env_if_present() {
   export TEXT_MODEL_ID="${TEXT_MODEL_ID:-google/gemma-3-12b-it-qat-q4_0-unquantized}"
   export TEXT_MODEL_DIR="${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}"
   export TEXT_MODEL_REGISTRY="${TEXT_MODEL_REGISTRY:-google/gemma-3-12b-it-qat-q4_0-unquantized}"
+  if [[ -z "${TEXT_DEVICE:-}" ]]; then
+    case "${GATEWAY_PROFILE,,}" in
+      *h100*) export TEXT_DEVICE="cuda:1" ;;
+      *) export TEXT_DEVICE="cuda:0" ;;
+    esac
+  else
+    export TEXT_DEVICE
+  fi
   export LTX_MODEL_DIR="${LTX_MODEL_DIR:-models/ltx-2.3}"
   export LTX_GEMMA_ROOT="${LTX_GEMMA_ROOT:-$TEXT_MODEL_DIR}"
   export HF_HOME="${HF_HOME:-$ROOT_DIR/models/.cache/huggingface}"
@@ -93,6 +101,8 @@ load_env_if_present() {
   export LTX_CUDA_DEVICE="${LTX_CUDA_DEVICE:-cuda:0}"
   export LTX_QUANTIZATION="${LTX_QUANTIZATION:-none}"
   export LTX_TORCH_COMPILE="${LTX_TORCH_COMPILE:-false}"
+  export LTX_PRELOAD_ON_START="${LTX_PRELOAD_ON_START:-true}"
+  export LTX_CLEAR_PIPELINE_ON_OOM="${LTX_CLEAR_PIPELINE_ON_OOM:-false}"
   export LTX_LOCAL_MAX_HEAVY_JOBS="${LTX_LOCAL_MAX_HEAVY_JOBS:-1}"
   export QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:6333}"
   export QDRANT_API_KEY="${QDRANT_API_KEY:-}"

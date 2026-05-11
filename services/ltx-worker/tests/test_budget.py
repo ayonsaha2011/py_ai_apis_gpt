@@ -137,14 +137,14 @@ def test_tiling_for_small() -> None:
 
 def test_tiling_for_mid() -> None:
     tiling = _tiling_for(1024, 576, 121)
-    assert tiling.spatial_config.tile_size_in_pixels == 448
-    assert tiling.temporal_config.tile_size_in_frames == 48
+    assert tiling.spatial_config.tile_size_in_pixels == 320
+    assert tiling.temporal_config.tile_size_in_frames == 24
 
 
 def test_tiling_for_large() -> None:
     tiling = _tiling_for(1408, 768, 481)
-    assert tiling.spatial_config.tile_size_in_pixels == 384
-    assert tiling.temporal_config.tile_size_in_frames == 32
+    assert tiling.spatial_config.tile_size_in_pixels == 256
+    assert tiling.temporal_config.tile_size_in_frames == 24
 
 
 def test_vram_probe_rejects_when_pool_too_small(monkeypatch: pytest.MonkeyPatch, h200_profile: None) -> None:

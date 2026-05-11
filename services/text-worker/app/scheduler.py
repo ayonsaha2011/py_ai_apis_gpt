@@ -105,7 +105,12 @@ class GenerationScheduler:
         self.model_id = settings.model_id
         self.tokenizer: Any | None = None
         self.model: Any | None = None
-        self.device = torch.device(settings.device if torch.cuda.is_available() else "cpu")
+        if settings.device.startswith("cuda") and not torch.cuda.is_available():
+            raise RuntimeError(
+                "TEXT_DEVICE is set to CUDA, but this worker loaded a CPU-only PyTorch runtime. "
+                "Install the CUDA PyTorch environment or set TEXT_DEVICE explicitly for a non-GPU deployment."
+            )
+        self.device = torch.device(settings.device)
         self.dtype = torch.bfloat16 if settings.dtype == "bfloat16" else torch.float16
         self.waiting: asyncio.Queue[GenerationTicket] = asyncio.Queue(maxsize=settings.max_waiting)
         self.kv_cache = KVCacheManager(settings.kv_cache_bytes, settings.kv_cache_ttl_seconds)
@@ -126,9 +131,22 @@ class GenerationScheduler:
 
     async def switch_model(self, model_id: str) -> None:
         async with self._model_lock:
+            if self.model is not None and model_id == self.model_id:
+                logger.info("text model already loaded model_id=%s", model_id)
+                return
             self.model_id = model_id
             await asyncio.to_thread(self._load_model, model_id)
             self.kv_cache = KVCacheManager(settings.kv_cache_bytes, settings.kv_cache_ttl_seconds)
+
+    def model_loaded(self) -> bool:
+        return self.model is not None and self.tokenizer is not None
+
+    def assert_serves_model(self, model_id: str | None) -> None:
+        if model_id and model_id != self.model_id:
+            raise ValueError(
+                f"text worker has loaded model {self.model_id}; requested {model_id}. "
+                "Start that model through /admin/models/start before sending requests."
+            )
 
     async def submit(self, request: ChatRequest) -> str:
         loop = asyncio.get_running_loop()
@@ -174,6 +192,7 @@ class GenerationScheduler:
 
     def _load_model(self, model_id: str) -> None:
         source = self._model_source(model_id)
+        logger.info("loading text model model_id=%s source=%s device=%s dtype=%s", model_id, source, self.device, self.dtype)
         self.tokenizer = AutoTokenizer.from_pretrained(source)
         if self.tokenizer.pad_token_id is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
@@ -188,6 +207,7 @@ class GenerationScheduler:
         self.model.eval()
         if self.device.type == "cpu":
             self.model.to(self.device)
+        logger.info("text model ready model_id=%s source=%s device=%s", model_id, source, self.device)
 
     def _model_source(self, model_id: str) -> str:
         model_dir = Path(settings.text_model_dir)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 import torch
@@ -14,6 +15,7 @@ from .ltx_runner import (
     ensure_runtime_ready,
     is_cuda_oom,
     materialize_inputs,
+    preload_ltx_models,
     release_cuda_memory,
     run_ltx_job,
     runtime_status,
@@ -33,7 +35,17 @@ def _check_service_key(x_service_key: str | None) -> None:
         raise HTTPException(status_code=401, detail="invalid service key")
 
 
-app = FastAPI(title="ltx-worker")
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    if settings.preload_on_start:
+        logger.info("preloading LTX singleton full dev model at service startup")
+        await asyncio.to_thread(preload_ltx_models)
+    else:
+        logger.warning("LTX_PRELOAD_ON_START=false; first job will load the model lazily")
+    yield
+
+
+app = FastAPI(title="ltx-worker", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -140,7 +152,7 @@ async def run_job(body: InternalJobRequest, x_service_key: str | None = Header(d
                     body.user_id,
                     exc_info=(type(exc), exc, exc.__traceback__),
                 )
-            release_cuda_memory(clear_pipelines=True)
+            release_cuda_memory(clear_pipelines=settings.clear_pipeline_on_oom)
             hint = current_budget_hint()
             raise HTTPException(
                 status_code=507,

@@ -74,6 +74,7 @@ async def health() -> dict:
     return {
         "status": "ok",
         "model_id": scheduler.model_id,
+        "model_loaded": scheduler.model_loaded(),
         "text_model_dir": str(settings.text_model_dir),
     }
 
@@ -100,6 +101,10 @@ async def chat_completions(
         req = ChatRequest.model_validate(body)
     except ValidationError as exc:
         logger.warning("invalid chat request detail=%s", exc)
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    try:
+        scheduler.assert_serves_model(req.model)
+    except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     rag_audit: dict | None = None
     if req.use_rag and x_rag_qdrant_collection:

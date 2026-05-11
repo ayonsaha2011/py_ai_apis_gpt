@@ -44,10 +44,20 @@ load_env() {
   export TEXT_WORKER_URL="${TEXT_WORKER_URL:-http://127.0.0.1:8101}"
   export LTX_WORKER_URL="${LTX_WORKER_URL:-http://127.0.0.1:8102}"
   export TEXT_MODEL_DIR="${TEXT_MODEL_DIR:-models/text/gemma-3-12b-it-qat-q4_0-unquantized}"
+  if [[ -z "${TEXT_DEVICE:-}" ]]; then
+    case "${GATEWAY_PROFILE,,}" in
+      *h100*) export TEXT_DEVICE="cuda:1" ;;
+      *) export TEXT_DEVICE="cuda:0" ;;
+    esac
+  else
+    export TEXT_DEVICE
+  fi
   export LTX_MODEL_DIR="${LTX_MODEL_DIR:-models/ltx-2.3}"
   export LTX_GEMMA_ROOT="${LTX_GEMMA_ROOT:-$TEXT_MODEL_DIR}"
   export LTX_CUDA_DEVICE="${LTX_CUDA_DEVICE:-cuda:0}"
   export LTX_QUANTIZATION="${LTX_QUANTIZATION:-none}"
+  export LTX_PRELOAD_ON_START="${LTX_PRELOAD_ON_START:-true}"
+  export LTX_CLEAR_PIPELINE_ON_OOM="${LTX_CLEAR_PIPELINE_ON_OOM:-false}"
   export QDRANT_URL="${QDRANT_URL:-http://127.0.0.1:6333}"
   export QDRANT_MANAGED="${QDRANT_MANAGED:-1}"
   export QDRANT_IMAGE="${QDRANT_IMAGE:-qdrant/qdrant:v1.11.0}"

@@ -57,7 +57,11 @@ After `git pull`, restart the gateway to pick up Rust gateway changes. The H200 
 bash scripts/deploy_h200.sh restart gateway
 ```
 
-For full 22B BF16 H200 text-to-video, the gateway admits 5-second HD jobs at `1024x576` and `121` frames. The LTX worker keeps one full dev pipeline on GPU, so distilled and specialized modes are rejected before GPU allocation. A single 20-second HD job is not supported by this full-dev-only profile; it needs a future chunk-and-stitch workflow that runs multiple 5-second segments and joins them after generation.
+The LTX worker preloads one full dev pipeline at service startup (`LTX_PRELOAD_ON_START=true`) and reuses that singleton for all video jobs in that worker process. The OOM handler does not clear that pipeline by default (`LTX_CLEAR_PIPELINE_ON_OOM=false`), so repeated requests do not reload the model unless the service process is restarted.
+
+The text worker stays on CUDA by default with `TEXT_DEVICE=cuda:0` and fails fast if CUDA is unavailable. A single 141 GiB H200 can hold the full-dev LTX pipeline plus the Gemma text worker weights, but the combined resident set leaves little transient headroom for VAE decode/encode. The worker therefore preloads a single LTX pipeline, reuses it, clears transient CUDA buffers before encoding, and uses conservative VAE tiling. The selected Gemma QAT repository publishes an unquantized checkpoint, so the custom PyTorch text worker loads BF16-sized weights unless a separate GPU quantization path is added. On multi-GPU servers, use `TEXT_DEVICE=cuda:1` if LTX owns `cuda:0`.
+
+For full 22B BF16 H200 text-to-video, the worker uses the one-stage full dev pipeline. Keep requests within the LTX token budget shown by `/health`; examples include `1408x768@481f` for 20 seconds, `1664x928@241f` for 10 seconds, and `1920x1088@121f` for 5 seconds.
 
 4K and Full HD output sizes above the native render budget are supported as output-only upscaling for 5-second jobs. The API response and history include `metadata.upscaled`, `render_width`, `render_height`, `output_width`, and `output_height` so operators can distinguish native render cost from final artifact size.
 
@@ -72,5 +76,5 @@ sudo systemctl enable --now py-ai-text-worker py-ai-ltx-worker py-ai-gateway
 
 Supported H200 outcomes:
 
-- Full 22B BF16: native HD 5 seconds, 4K output via upscale 5 seconds.
+- Full 22B BF16: native 20 seconds within the configured token budget, 4K output via upscale 5 seconds.
 - Distilled/specialized: disabled to avoid loading a second model.
