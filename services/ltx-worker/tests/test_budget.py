@@ -122,7 +122,7 @@ def test_use_one_stage_long() -> None:
 
 
 def test_use_one_stage_short_small() -> None:
-    assert _use_one_stage(_req(1024, 576, 121)) is False
+    assert _use_one_stage(_req(1024, 576, 121)) is True
 
 
 def test_use_one_stage_short_large() -> None:

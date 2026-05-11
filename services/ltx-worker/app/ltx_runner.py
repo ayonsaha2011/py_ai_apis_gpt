@@ -258,20 +258,18 @@ def _one_stage_pipeline() -> Any:
     )
 
 
-def _use_one_stage(req: VideoRequest) -> bool:
-    if req.num_frames > 121:
-        return True
-    if req.width * req.height > 1280 * 704:
-        return True
-    return False
+def _use_one_stage(_req: VideoRequest) -> bool:
+    # Two-stage loads the transformer for stage-1 then again for stage-2; the
+    # window where both instances are simultaneously resident peaks at ~88 GB
+    # (2 × 44 GB transformer) plus spatial-upsampler weights, which with the
+    # text-worker co-tenant (~22 GB) pushes past H200 141 GB for any request.
+    # One-stage uses a single transformer load (~44 GB) and no upsampler.
+    return True
 
 
-def _select_pipeline(req: VideoRequest) -> tuple[Any, str]:
-    if _use_one_stage(req):
-        _two_stage_pipeline.cache_clear()
-        return _one_stage_pipeline(), "one_stage"
-    _one_stage_pipeline.cache_clear()
-    return _two_stage_pipeline(), "two_stage"
+def _select_pipeline(_req: VideoRequest) -> tuple[Any, str]:
+    _two_stage_pipeline.cache_clear()
+    return _one_stage_pipeline(), "one_stage"
 
 
 def _tiling_for(width: int, height: int, frames: int) -> Any:
