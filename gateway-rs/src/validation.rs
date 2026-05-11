@@ -169,7 +169,8 @@ fn ltx_budget(profile: &str) -> LtxBudget {
         max_output_pixels: 1024 * 1024,
         max_upscaled_frames: 121,
         label: "local full 22B LTX",
-        guidance: "use 5 seconds at 768x448, or switch to the H200 profile for larger 5-second jobs",
+        guidance:
+            "use 5 seconds at 768x448, or switch to the H200 profile for larger 5-second jobs",
     }
 }
 

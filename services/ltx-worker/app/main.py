@@ -53,6 +53,16 @@ async def run_job(body: InternalJobRequest, x_service_key: str | None = Header(d
     try:
         validate_ltx_budget(body.request)
     except ValueError as exc:
+        logger.warning(
+            "LTX job rejected by budget validation job_id=%s user_id=%s mode=%s size=%sx%s frames=%s detail=%s",
+            body.job_id,
+            body.user_id,
+            body.request.mode.value,
+            body.request.width,
+            body.request.height,
+            body.request.num_frames,
+            exc,
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     cancel_event = asyncio.Event()
     _jobs[body.job_id] = cancel_event
@@ -62,6 +72,13 @@ async def run_job(body: InternalJobRequest, x_service_key: str | None = Header(d
         try:
             ensure_runtime_ready()
         except RuntimeError as exc:
+            logger.error(
+                "LTX runtime not ready job_id=%s user_id=%s detail=%s",
+                body.job_id,
+                body.user_id,
+                exc,
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         async with _gpu_lock:
             if cancel_event.is_set():
@@ -69,6 +86,13 @@ async def run_job(body: InternalJobRequest, x_service_key: str | None = Header(d
             try:
                 req = await materialize_inputs(body.request, job_dir)
             except ValueError as exc:
+                logger.warning(
+                    "LTX input materialization rejected job_id=%s user_id=%s mode=%s detail=%s",
+                    body.job_id,
+                    body.user_id,
+                    body.request.mode.value,
+                    exc,
+                )
                 raise HTTPException(status_code=422, detail=str(exc)) from exc
             if cancel_event.is_set():
                 raise HTTPException(status_code=409, detail="job cancelled after input materialization")
@@ -78,6 +102,15 @@ async def run_job(body: InternalJobRequest, x_service_key: str | None = Header(d
             result_url = await store_video(output_path, body.r2_key)
             return {"job_id": body.job_id, "status": "complete", "result_url": result_url, "metadata": metadata}
     except HTTPException:
+        logger.info(
+            "LTX job ended without completion job_id=%s user_id=%s mode=%s size=%sx%s frames=%s",
+            body.job_id,
+            body.user_id,
+            body.request.mode.value,
+            body.request.width,
+            body.request.height,
+            body.request.num_frames,
+        )
         raise
     except Exception as exc:
         if is_cuda_oom(exc):
@@ -86,12 +119,27 @@ async def run_job(body: InternalJobRequest, x_service_key: str | None = Header(d
                 free, total = torch.cuda.mem_get_info()
                 free_gib, total_gib = free >> 30, total >> 30
                 logger.error(
-                    "LTX OOM. free=%dGiB/%dGiB profile=%s\n%s",
-                    free_gib, total_gib, settings.gpu_profile,
+                    "LTX OOM job_id=%s user_id=%s mode=%s size=%sx%s frames=%s seed=%s free=%dGiB/%dGiB profile=%s\n%s",
+                    body.job_id,
+                    body.user_id,
+                    body.request.mode.value,
+                    body.request.width,
+                    body.request.height,
+                    body.request.num_frames,
+                    body.effective_seed,
+                    free_gib,
+                    total_gib,
+                    settings.gpu_profile,
                     torch.cuda.memory_summary(abbreviated=True),
+                    exc_info=(type(exc), exc, exc.__traceback__),
                 )
             except RuntimeError:
-                logger.error("LTX OOM; mem_get_info unavailable", exc_info=exc)
+                logger.error(
+                    "LTX OOM job_id=%s user_id=%s; mem_get_info unavailable",
+                    body.job_id,
+                    body.user_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
             release_cuda_memory(clear_pipelines=True)
             hint = current_budget_hint()
             raise HTTPException(
@@ -103,7 +151,21 @@ async def run_job(body: InternalJobRequest, x_service_key: str | None = Header(d
                     f"recommended sizes: {hint['examples']}."
                 ),
             ) from exc
-        raise
+        logger.error(
+            "LTX job crashed job_id=%s user_id=%s mode=%s size=%sx%s frames=%s seed=%s",
+            body.job_id,
+            body.user_id,
+            body.request.mode.value,
+            body.request.width,
+            body.request.height,
+            body.request.num_frames,
+            body.effective_seed,
+            exc_info=(type(exc), exc, exc.__traceback__),
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"LTX worker internal error for job {body.job_id}; see ltx server logs",
+        ) from exc
     finally:
         release_cuda_memory()
         _jobs.pop(body.job_id, None)

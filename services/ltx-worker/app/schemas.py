@@ -43,4 +43,4 @@ class InternalJobRequest(BaseModel):
     request: VideoRequest
     effective_seed: int
     r2_key: str
-
+    user_id: str | None = None

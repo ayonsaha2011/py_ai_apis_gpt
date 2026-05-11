@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 import uuid
 from collections import OrderedDict, defaultdict
@@ -16,6 +17,7 @@ from .config import settings
 from .schemas import ChatMessage, ChatRequest
 
 
+logger = logging.getLogger(__name__)
 Past = tuple[tuple[torch.Tensor, ...], ...] | tuple[Any, ...]
 
 
@@ -211,6 +213,12 @@ class GenerationScheduler:
                 async with self._model_lock:
                     await asyncio.to_thread(self._decode_one_tick, active)
             except Exception as exc:
+                logger.error(
+                    "text scheduler decode tick failed active=%d model_id=%s",
+                    len(active),
+                    self.model_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
                 self._fail_states(active, exc)
             active[:] = [state for state in active if not state.finished]
 
@@ -237,6 +245,12 @@ class GenerationScheduler:
                 async with self._model_lock:
                     await asyncio.to_thread(self._prefill, prefill)
             except Exception as exc:
+                logger.error(
+                    "text scheduler prefill failed batch=%d model_id=%s",
+                    len(prefill),
+                    self.model_id,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
                 self._fail_states(prefill, exc)
 
     def _active_token_budget(self, active: list[ActiveState]) -> int:

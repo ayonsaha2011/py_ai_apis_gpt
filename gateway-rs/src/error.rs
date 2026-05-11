@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use serde_json::json;
+use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -31,7 +32,7 @@ pub type Result<T> = std::result::Result<T, AppError>;
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let status = match self {
+        let status = match &self {
             AppError::Unauthorized => StatusCode::UNAUTHORIZED,
             AppError::Forbidden => StatusCode::FORBIDDEN,
             AppError::NotFound => StatusCode::NOT_FOUND,
@@ -42,8 +43,26 @@ impl IntoResponse for AppError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         };
+        let error_id = Uuid::now_v7();
+        if status.is_server_error() {
+            tracing::error!(
+                error_id = %error_id,
+                status = status.as_u16(),
+                error = %self,
+                error_debug = ?self,
+                "request failed"
+            );
+        } else if status != StatusCode::UNAUTHORIZED {
+            tracing::warn!(
+                error_id = %error_id,
+                status = status.as_u16(),
+                error = %self,
+                "request rejected"
+            );
+        }
         let body = Json(json!({
             "error": {
+                "id": error_id,
                 "status": status.as_u16(),
                 "code": status.canonical_reason().unwrap_or("error"),
                 "message": self.to_string()

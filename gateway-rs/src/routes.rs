@@ -772,6 +772,13 @@ async fn dispatch_one_video_job(state: AppState) -> Result<()> {
     let req: VideoJobRequest = match serde_json::from_str(&params_json) {
         Ok(req) => req,
         Err(err) => {
+            tracing::error!(
+                job_id = %job_id,
+                user_id = %user_id,
+                error = %err,
+                params_json = %params_json,
+                "video job contains invalid params_json"
+            );
             state
                 .db
                 .update_video_job(
@@ -831,6 +838,17 @@ async fn dispatch_one_video_job(state: AppState) -> Result<()> {
         Ok(resp) => {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            tracing::error!(
+                job_id = %job_id,
+                user_id = %user_id,
+                status = status.as_u16(),
+                mode = req.mode.as_str(),
+                width = req.width,
+                height = req.height,
+                num_frames = req.num_frames,
+                worker_error = %text,
+                "LTX worker returned a failed video job response"
+            );
             state
                 .db
                 .update_video_job(
@@ -844,6 +862,17 @@ async fn dispatch_one_video_job(state: AppState) -> Result<()> {
                 .await?;
         }
         Err(err) => {
+            tracing::error!(
+                job_id = %job_id,
+                user_id = %user_id,
+                mode = req.mode.as_str(),
+                width = req.width,
+                height = req.height,
+                num_frames = req.num_frames,
+                error = %err,
+                error_debug = ?err,
+                "failed to call LTX worker for video job"
+            );
             state
                 .db
                 .update_video_job(&job_id, "failed", 0.0, None, Some(&err.to_string()), None)
