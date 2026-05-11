@@ -403,13 +403,14 @@ def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> t
                 logger.debug("ltx_runner job=%s could not read pre-encode CUDA memory", job_id, exc_info=True)
 
         chunks = get_video_chunks_number(req.num_frames, tiling)
-        encode_video(
-            video=video,
-            fps=int(fps),
-            audio=audio,
-            output_path=str(output_path),
-            video_chunks_number=chunks,
-        )
+        with torch.inference_mode():
+            encode_video(
+                video=video,
+                fps=int(fps),
+                audio=audio,
+                output_path=str(output_path),
+                video_chunks_number=chunks,
+            )
     finally:
         if "video" in locals():
             del video
