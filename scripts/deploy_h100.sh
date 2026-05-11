@@ -245,9 +245,42 @@ install_pytorch_if_requested() {
   "$VENV_DIR/bin/python" -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 }
 
+install_ltx_from_clone() {
+  local req="$ROOT_DIR/infra/requirements-h100-system.txt"
+  local repo_url="https://github.com/Lightricks/LTX-2.git"
+  local commit
+  commit="$(grep '^ltx-core @' "$req" | sed 's/.*\.git@\([a-f0-9]*\)#.*/\1/')"
+  [[ -n "$commit" ]] || fail "Could not extract LTX-2 commit from $req"
+  local clone_dir="/tmp/ltx-2-src"
+  if [[ -d "$clone_dir/.git" ]]; then
+    local current
+    current="$(git -C "$clone_dir" rev-parse HEAD 2>/dev/null || true)"
+    if [[ "$current" != "$commit" ]]; then
+      info "LTX-2 clone at wrong commit ($current); re-cloning..."
+      rm -rf "$clone_dir"
+    else
+      info "LTX-2 already cloned at $commit"
+    fi
+  fi
+  if [[ ! -d "$clone_dir/.git" ]]; then
+    info "Cloning LTX-2 (full clone — avoids GitHub blob filter 500 errors)..."
+    git clone "$repo_url" "$clone_dir"
+    git -C "$clone_dir" checkout "$commit"
+  fi
+  info "Installing ltx-core and ltx-pipelines from local clone..."
+  "$VENV_DIR/bin/python" -m pip install \
+    "$clone_dir/packages/ltx-core" \
+    "$clone_dir/packages/ltx-pipelines"
+}
+
 install_python_deps() {
   info "Installing Python dependencies without replacing system CUDA PyTorch..."
-  "$VENV_DIR/bin/python" -m pip install -r "$ROOT_DIR/infra/requirements-h100-system.txt"
+  local tmp_req
+  tmp_req="$(mktemp)"
+  grep -v '^ltx-' "$ROOT_DIR/infra/requirements-h100-system.txt" > "$tmp_req"
+  "$VENV_DIR/bin/python" -m pip install -r "$tmp_req"
+  rm -f "$tmp_req"
+  install_ltx_from_clone
   ensure_huggingface_download_deps
 }
 
