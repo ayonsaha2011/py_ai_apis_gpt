@@ -2,18 +2,28 @@ from __future__ import annotations
 
 import asyncio
 import gc
-import math
-import shutil
-import subprocess
+import logging
+import os
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
 import torch
 
 from .config import settings
 from .media import fetch_media
 from .schemas import VideoMode, VideoRequest
+
+logger = logging.getLogger(__name__)
+
+WEIGHT_BYTES = 44 * 1024**3
+PER_TOKEN_ACT_BYTES = 48 * 1024
+OVERHEAD_BYTES = 12 * 1024**3
+SAFETY_BYTES = 6 * 1024**3
+
+_PRECISION_READY = False
 
 
 def _files() -> dict[str, str]:
@@ -50,14 +60,32 @@ def _device() -> torch.device:
 
 
 def runtime_status() -> dict[str, Any]:
+    vram_free_gib = 0.0
+    vram_total_gib = 0.0
+    gpu_name = ""
+    if torch.cuda.is_available():
+        try:
+            free, total = torch.cuda.mem_get_info()
+            vram_free_gib = free / 1024**3
+            vram_total_gib = total / 1024**3
+            gpu_name = torch.cuda.get_device_name(0)
+        except RuntimeError:
+            pass
     return {
         "cuda_requested": settings.cuda_device.startswith("cuda"),
         "cuda_available": torch.cuda.is_available(),
         "cuda_device": settings.cuda_device,
-        "full_dev_only": True,
+        "gpu_profile": settings.gpu_profile,
+        "gpu_name": gpu_name,
+        "vram_free_gib": round(vram_free_gib, 2),
+        "vram_total_gib": round(vram_total_gib, 2),
         "torch_version": torch.__version__,
         "torch_cuda": torch.version.cuda,
         "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        "pipeline_one_stage_built": _one_stage_pipeline.cache_info().currsize > 0,
+        "pipeline_two_stage_built": _two_stage_pipeline.cache_info().currsize > 0,
+        "max_num_frames": settings.max_num_frames,
+        "max_tokens": _max_tokens(),
     }
 
 
@@ -68,6 +96,7 @@ def is_cuda_oom(exc: BaseException) -> bool:
 def release_cuda_memory(clear_pipelines: bool = False) -> None:
     if clear_pipelines:
         _two_stage_pipeline.cache_clear()
+        _one_stage_pipeline.cache_clear()
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -78,11 +107,77 @@ def release_cuda_memory(clear_pipelines: bool = False) -> None:
 
 
 def ensure_runtime_ready() -> None:
+    global _PRECISION_READY
     if settings.cuda_device.startswith("cuda") and not torch.cuda.is_available():
         raise RuntimeError(
             "CUDA is required for LTX generation but this worker loaded a CPU-only PyTorch runtime. "
             "Install the locked CUDA PyTorch environment with Python 3.12, then restart the worker."
-    )
+        )
+    if not _PRECISION_READY and torch.cuda.is_available():
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cudnn.benchmark = True
+        _PRECISION_READY = True
+
+
+def _max_tokens() -> int:
+    profile = settings.gpu_profile.lower()
+    if "h200" in profile:
+        return settings.max_tokens_h200
+    if "h100" in profile:
+        return settings.max_tokens_h100
+    return settings.max_tokens_local
+
+
+def _token_count(width: int, height: int, num_frames: int) -> int:
+    return ((num_frames - 1) // 8 + 1) * (height // 8) * (width // 8)
+
+
+def _required_bytes(tokens: int) -> int:
+    return WEIGHT_BYTES + tokens * PER_TOKEN_ACT_BYTES + OVERHEAD_BYTES
+
+
+def _suggest_native(num_frames: int, cap: int, aspect: float = 16 / 9) -> tuple[int, int]:
+    f_factor = (num_frames - 1) // 8 + 1
+    if f_factor <= 0:
+        return 768, 448
+    spatial_cap = cap // f_factor
+    if spatial_cap <= 0:
+        return 768, 448
+    width_latent = int((spatial_cap * aspect) ** 0.5)
+    height_latent = int(width_latent / aspect)
+    width = max(256, (width_latent * 8 // 32) * 32)
+    height = max(256, (height_latent * 8 // 32) * 32)
+    while _token_count(width, height, num_frames) > cap and (width > 256 or height > 256):
+        if width >= height and width > 256:
+            width -= 32
+        elif height > 256:
+            height -= 32
+        else:
+            break
+    return width, height
+
+
+def current_budget_hint() -> dict[str, Any]:
+    profile = settings.gpu_profile.lower()
+    cap = _max_tokens()
+    examples = {
+        "h200": "1408x768@481f (20s), 1664x928@241f (10s), 1920x1088@121f (5s)",
+        "h100": "768x448@481f (20s), 1024x576@241f (10s), 1280x704@121f (5s)",
+    }
+    if "h200" in profile:
+        example = examples["h200"]
+    elif "h100" in profile:
+        example = examples["h100"]
+    else:
+        example = "768x448 up to 81f"
+    return {
+        "profile": settings.gpu_profile,
+        "max_tokens": cap,
+        "max_num_frames": settings.max_num_frames,
+        "examples": example,
+    }
 
 
 def validate_ltx_budget(req: VideoRequest) -> None:
@@ -91,99 +186,43 @@ def validate_ltx_budget(req: VideoRequest) -> None:
             "this LTX worker allows only text_to_video and image_to_video; "
             "distilled and specialized modes are disabled so the worker keeps one full dev model on GPU"
         )
-    if (req.num_frames - 1) % 8 != 0:
+    if req.num_frames < 1 or (req.num_frames - 1) % 8 != 0:
         raise ValueError("num_frames must satisfy 8k+1")
     if req.num_inference_steps is not None and not 1 <= req.num_inference_steps <= 40:
         raise ValueError("num_inference_steps must be between 1 and 40")
-
-    budget = _ltx_budget(req)
-    native_request = _native_request_fits(req, budget)
-    upscaled_request = (
-        not native_request
-        and budget["max_output_side"] > budget["max_native_side"]
-        and req.num_frames <= budget["max_upscaled_frames"]
-    )
     if req.width % 32 != 0 or req.height % 32 != 0:
-        if not upscaled_request or req.width % 2 != 0 or req.height % 2 != 0:
+        raise ValueError("width and height must be divisible by 32")
+    if req.width < 256 or req.height < 256:
+        raise ValueError("width and height must be >= 256")
+    if req.num_frames > settings.max_num_frames:
+        raise ValueError(
+            f"num_frames {req.num_frames} exceeds max {settings.max_num_frames} "
+            f"(~{(settings.max_num_frames - 1) / 24:.1f}s @24fps)"
+        )
+
+    tokens = _token_count(req.width, req.height, req.num_frames)
+    cap = _max_tokens()
+    if tokens > cap:
+        suggested_w, suggested_h = _suggest_native(req.num_frames, cap)
+        raise ValueError(
+            f"{req.width}x{req.height}@{req.num_frames}f exceeds {settings.gpu_profile} "
+            f"single-shot capacity ({tokens} > {cap} tokens). "
+            f"Suggested native at this duration: {suggested_w}x{suggested_h}@{req.num_frames}f. "
+            f"For other durations on H200: 1664x928@241f, 1920x1088@121f."
+        )
+
+    if torch.cuda.is_available():
+        try:
+            free, _ = torch.cuda.mem_get_info(_device())
+        except RuntimeError:
+            return
+        required = _required_bytes(tokens) + SAFETY_BYTES
+        if free < required:
             raise ValueError(
-                "width and height must be divisible by 32 for native generation, or even for upscaled output"
+                f"GPU currently has only {free >> 30} GiB free; "
+                f"{req.width}x{req.height}@{req.num_frames}f needs ~{required >> 30} GiB. "
+                f"Retry shortly or reduce size."
             )
-    if req.width > budget["max_output_side"] or req.height > budget["max_output_side"]:
-        raise ValueError(f"width/height exceed 4K output limit {budget['max_output_side']}")
-    output_pixels = req.width * req.height
-    if output_pixels > budget["max_output_pixels"]:
-        raise ValueError(f"width/height exceed 4K output pixel limit {budget['max_output_pixels']}")
-    max_frame_limit = max(budget["max_frames"], budget["max_upscaled_frames"])
-    if req.num_frames > max_frame_limit:
-        requested_seconds = _frame_seconds(req.num_frames, req.frame_rate)
-        allowed_seconds = _frame_seconds(max_frame_limit, req.frame_rate)
-        raise ValueError(
-            f"num_frames exceeds {max_frame_limit} for {budget['label']}; "
-            f"requested {req.num_frames} frames (~{requested_seconds:.1f}s), "
-            f"allowed {max_frame_limit} frames (~{allowed_seconds:.1f}s). {budget['guidance']}"
-        )
-    pixel_frames = req.width * req.height * req.num_frames
-    if not native_request and (
-        req.num_frames > budget["max_upscaled_frames"] or budget["max_output_side"] <= budget["max_native_side"]
-    ):
-        raise ValueError(
-            f"request exceeds {budget['label']} memory budget ({pixel_frames} pixel-frames > {budget['max_pixel_frames']}); {budget['guidance']}"
-        )
-
-
-def _ltx_budget(req: VideoRequest) -> dict[str, Any]:
-    profile = settings.gpu_profile.lower()
-    h200 = "h200" in profile
-    h100 = "h100" in profile
-    if h200:
-        return {
-            "max_native_side": 1536,
-            "max_frames": 121,
-            "max_pixel_frames": 1024 * 576 * 121,
-            "max_output_side": 4096,
-            "max_output_pixels": 4096 * 2160,
-            "max_upscaled_frames": 121,
-            "label": "H200 full 22B bf16 LTX",
-            "guidance": "use 5 seconds at 1024x576 per job; 20s HD requires chunked/stitch generation, which is not enabled while the worker keeps only one full dev model on GPU",
-        }
-    if h100:
-        return {
-            "max_native_side": 1024,
-            "max_frames": 121,
-            "max_pixel_frames": 768 * 448 * 121,
-            "max_output_side": 4096,
-            "max_output_pixels": 4096 * 2160,
-            "max_upscaled_frames": 121,
-            "label": "H100 full 22B bf16 LTX",
-            "guidance": "use 5 seconds at 768x448 per job, or use H200 for larger 5-second jobs",
-        }
-    return {
-        "max_native_side": 1024,
-        "max_frames": 121,
-        "max_pixel_frames": 768 * 448 * 121,
-        "max_output_side": 1024,
-        "max_output_pixels": 1024 * 1024,
-        "max_upscaled_frames": 121,
-        "label": "local full 22B LTX",
-        "guidance": "use 5 seconds at 768x448, or switch to the H200 profile for larger 5-second jobs",
-    }
-
-
-def _frame_seconds(frames: int, frame_rate: float | None) -> float:
-    fps = max(frame_rate or 24.0, 1.0)
-    return max(frames - 1, 0) / fps
-
-
-def _native_request_fits(req: VideoRequest, budget: dict[str, Any]) -> bool:
-    pixel_frames = req.width * req.height * req.num_frames
-    return (
-        req.width <= budget["max_native_side"]
-        and req.height <= budget["max_native_side"]
-        and req.num_frames <= budget["max_frames"]
-        and pixel_frames <= budget["max_pixel_frames"]
-        and req.width % 32 == 0
-        and req.height % 32 == 0
-    )
 
 
 @lru_cache(maxsize=1)
@@ -193,13 +232,64 @@ def _two_stage_pipeline() -> Any:
     return TI2VidTwoStagesPipeline(
         checkpoint_path=_pick("ltx-2.3-22b-dev.safetensors"),
         distilled_lora=[],
-        spatial_upsampler_path=_pick("ltx-2.3-spatial-upscaler-x2-1.1.safetensors", "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors"),
+        spatial_upsampler_path=_pick(
+            "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+            "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors",
+        ),
         gemma_root=_gemma_root(),
         loras=[],
         device=_device(),
         torch_compile=settings.torch_compile_ltx,
         **_quantization(),
     )
+
+
+@lru_cache(maxsize=1)
+def _one_stage_pipeline() -> Any:
+    from ltx_pipelines.ti2vid_one_stage import TI2VidOneStagePipeline
+
+    return TI2VidOneStagePipeline(
+        checkpoint_path=_pick("ltx-2.3-22b-dev.safetensors"),
+        gemma_root=_gemma_root(),
+        loras=[],
+        device=_device(),
+        torch_compile=settings.torch_compile_ltx,
+        **_quantization(),
+    )
+
+
+def _use_one_stage(req: VideoRequest) -> bool:
+    if req.num_frames > 121:
+        return True
+    if req.width * req.height > 1280 * 704:
+        return True
+    return False
+
+
+def _select_pipeline(req: VideoRequest) -> tuple[Any, str]:
+    if _use_one_stage(req):
+        _two_stage_pipeline.cache_clear()
+        return _one_stage_pipeline(), "one_stage"
+    _one_stage_pipeline.cache_clear()
+    return _two_stage_pipeline(), "two_stage"
+
+
+def _tiling_for(width: int, height: int, frames: int) -> Any:
+    from ltx_core.model.video_vae import TilingConfig
+    from ltx_core.model.video_vae.tiling import SpatialTilingConfig, TemporalTilingConfig
+
+    pixels = width * height * frames
+    if pixels > 200_000_000:
+        return TilingConfig(
+            spatial_config=SpatialTilingConfig(tile_size_in_pixels=384, tile_overlap_in_pixels=64),
+            temporal_config=TemporalTilingConfig(tile_size_in_frames=32, tile_overlap_in_frames=8),
+        )
+    if pixels > 60_000_000:
+        return TilingConfig(
+            spatial_config=SpatialTilingConfig(tile_size_in_pixels=448, tile_overlap_in_pixels=64),
+            temporal_config=TemporalTilingConfig(tile_size_in_frames=48, tile_overlap_in_frames=16),
+        )
+    return TilingConfig.default()
 
 
 async def run_ltx_job(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> tuple[Path, dict[str, Any]]:
@@ -210,114 +300,56 @@ async def run_ltx_job(job_id: str, req: VideoRequest, seed: int, output_path: Pa
 
 def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> tuple[Path, dict[str, Any]]:
     from ltx_core.components.guiders import MultiModalGuiderParams
-    from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
+    from ltx_core.model.video_vae import get_video_chunks_number
     from ltx_pipelines.utils.media_io import encode_video
 
-    generation_req, upscale_target = _generation_plan(req)
-    encode_path = output_path.parent / "native_output.mp4" if upscale_target else output_path
+    pipeline, pipeline_kind = _select_pipeline(req)
+    tiling = _tiling_for(req.width, req.height, req.num_frames)
+    images = _image_conditionings(req)
+    fps = req.frame_rate or 24.0
 
-    if generation_req.mode in {VideoMode.text_to_video, VideoMode.image_to_video}:
-        images = _image_conditionings(generation_req)
-        video, audio = _two_stage_pipeline()(
-            prompt=generation_req.prompt,
-            negative_prompt=generation_req.negative_prompt or "",
-            seed=seed,
-            height=generation_req.height,
-            width=generation_req.width,
-            num_frames=generation_req.num_frames,
-            frame_rate=generation_req.frame_rate or 24.0,
-            num_inference_steps=generation_req.num_inference_steps or 40,
-            video_guider_params=MultiModalGuiderParams(cfg_scale=generation_req.guidance_scale or 7.5),
-            audio_guider_params=MultiModalGuiderParams(),
-            images=images,
-            tiling_config=TilingConfig.default(),
-            enhance_prompt=bool(generation_req.enhance_prompt),
-        )
-    else:
-        video, audio = _run_specialized_pipeline(generation_req, seed)
+    logger.info(
+        "ltx_runner job=%s pipeline=%s %sx%s@%sf tokens=%s",
+        job_id, pipeline_kind, req.width, req.height, req.num_frames,
+        _token_count(req.width, req.height, req.num_frames),
+    )
 
-    chunks = get_video_chunks_number(generation_req.num_frames, TilingConfig.default())
+    video, audio = pipeline(
+        prompt=req.prompt,
+        negative_prompt=req.negative_prompt or "",
+        seed=seed,
+        height=req.height,
+        width=req.width,
+        num_frames=req.num_frames,
+        frame_rate=fps,
+        num_inference_steps=req.num_inference_steps or 40,
+        video_guider_params=MultiModalGuiderParams(cfg_scale=req.guidance_scale or 7.5),
+        audio_guider_params=MultiModalGuiderParams(),
+        images=images,
+        tiling_config=tiling,
+        enhance_prompt=bool(req.enhance_prompt),
+    )
+
+    chunks = get_video_chunks_number(req.num_frames, tiling)
     encode_video(
         video=video,
-        fps=int(generation_req.frame_rate or 24),
+        fps=int(fps),
         audio=audio,
-        output_path=str(encode_path),
+        output_path=str(output_path),
         video_chunks_number=chunks,
     )
-    if upscale_target:
-        _upscale_video(encode_path, output_path, upscale_target[0], upscale_target[1])
     metadata = {
-        "upscaled": bool(upscale_target),
-        "render_width": generation_req.width,
-        "render_height": generation_req.height,
+        "pipeline": pipeline_kind,
+        "render_width": req.width,
+        "render_height": req.height,
         "output_width": req.width,
         "output_height": req.height,
         "num_frames": req.num_frames,
-        "frame_rate": req.frame_rate or 24.0,
+        "frame_rate": fps,
+        "tokens": _token_count(req.width, req.height, req.num_frames),
+        "upscaled": False,
     }
     return output_path, metadata
-
-
-def _generation_plan(req: VideoRequest) -> tuple[VideoRequest, tuple[int, int] | None]:
-    budget = _ltx_budget(req)
-    if _native_request_fits(req, budget):
-        return req, None
-    native_pixels = max(32 * 32, budget["max_pixel_frames"] // max(req.num_frames, 1))
-    width, height = _fit_native_size(req.width, req.height, budget["max_native_side"], native_pixels)
-    data = req.model_dump()
-    data["width"] = width
-    data["height"] = height
-    return VideoRequest.model_validate(data), (req.width, req.height)
-
-
-def _fit_native_size(target_width: int, target_height: int, max_side: int, max_pixels: int) -> tuple[int, int]:
-    aspect = max(target_width, 1) / max(target_height, 1)
-    width = min(target_width, max_side, int(math.sqrt(max_pixels * aspect)))
-    height = min(target_height, max_side, int(width / aspect))
-    width = _floor_to_32(width)
-    height = _floor_to_32(height)
-    while width * height > max_pixels and (width > 256 or height > 256):
-        if width >= height and width > 256:
-            width -= 32
-        elif height > 256:
-            height -= 32
-        else:
-            break
-    return max(256, width), max(256, height)
-
-
-def _floor_to_32(value: int) -> int:
-    return max(256, (max(value, 256) // 32) * 32)
-
-
-def _upscale_video(input_path: Path, output_path: Path, width: int, height: int) -> None:
-    ffmpeg = shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg is required for 4K video output but was not found on PATH")
-    cmd = [
-        ffmpeg,
-        "-y",
-        "-i",
-        str(input_path),
-        "-vf",
-        f"scale={width}:{height}:flags=lanczos",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "slow",
-        "-crf",
-        "16",
-        "-pix_fmt",
-        "yuv420p",
-        "-c:a",
-        "copy",
-        "-movflags",
-        "+faststart",
-        str(output_path),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg upscale failed: {result.stderr[-2000:]}")
 
 
 def _image_conditionings(req: VideoRequest) -> list[Any]:
@@ -325,12 +357,6 @@ def _image_conditionings(req: VideoRequest) -> list[Any]:
         return []
     image_path = Path(req.extra.get("image_path")) if req.extra and req.extra.get("image_path") else None
     return [(str(image_path or req.image_url), 0)]
-
-
-def _run_specialized_pipeline(req: VideoRequest, seed: int) -> tuple[Any, Any]:
-    raise ValueError(
-        f"{req.mode.value} is disabled because this worker keeps exactly one LTX dev pipeline on GPU"
-    )
 
 
 async def materialize_inputs(req: VideoRequest, job_dir: Path) -> VideoRequest:

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import shutil
 from pathlib import Path
 
+import torch
 from fastapi import FastAPI, Header, HTTPException
 
 from .config import settings
 from .ltx_runner import (
+    current_budget_hint,
     ensure_runtime_ready,
     is_cuda_oom,
     materialize_inputs,
@@ -18,6 +21,8 @@ from .ltx_runner import (
 )
 from .schemas import InternalJobRequest
 from .storage import store_video
+
+logger = logging.getLogger(__name__)
 
 _jobs: dict[str, asyncio.Event] = {}
 _gpu_lock = asyncio.Lock()
@@ -38,6 +43,7 @@ async def health() -> dict:
         "status": "ok" if status["cuda_available"] else "degraded",
         "model_dir": str(settings.ltx_model_dir),
         "runtime": status,
+        "budget": current_budget_hint(),
     }
 
 
@@ -75,12 +81,26 @@ async def run_job(body: InternalJobRequest, x_service_key: str | None = Header(d
         raise
     except Exception as exc:
         if is_cuda_oom(exc):
+            free_gib = total_gib = 0
+            try:
+                free, total = torch.cuda.mem_get_info()
+                free_gib, total_gib = free >> 30, total >> 30
+                logger.error(
+                    "LTX OOM. free=%dGiB/%dGiB profile=%s\n%s",
+                    free_gib, total_gib, settings.gpu_profile,
+                    torch.cuda.memory_summary(abbreviated=True),
+                )
+            except RuntimeError:
+                logger.error("LTX OOM; mem_get_info unavailable", exc_info=exc)
             release_cuda_memory(clear_pipelines=True)
+            hint = current_budget_hint()
             raise HTTPException(
                 status_code=507,
                 detail=(
-                    "LTX generation exceeded available GPU memory. Reduce duration or resolution, "
-                    "or use 768x448 at 5 seconds for the full dev model."
+                    f"LTX OOM on {hint['profile']} (bf16 dev). "
+                    f"Free {free_gib} GiB / {total_gib} GiB. "
+                    f"Max single-shot budget {hint['max_tokens']} tokens; "
+                    f"recommended sizes: {hint['examples']}."
                 ),
             ) from exc
         raise
