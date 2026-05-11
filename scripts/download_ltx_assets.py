@@ -13,12 +13,14 @@ from pathlib import Path
 
 LTX_ALLOW = [
     "ltx-2.3-22b-dev.safetensors",
+    "ltx-2.3-22b-distilled-1.1.safetensors",
+    "ltx-2.3-22b-distilled.safetensors",
     "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
     "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors",
     "ltx-2.3-temporal-upscaler-x2-1.0.safetensors",
 ]
 
-DEFAULT_TEXT_MODEL_ID = "google/gemma-3-12b-it-qat-q4_0-unquantized"
+DEFAULT_TEXT_MODEL_ID = "mlabonne/gemma-3-12b-it-abliterated"
 BYTES_PER_GB = 1024**3
 HF_PACKAGES = ["huggingface_hub[cli]>=0.30,<1.0", "hf_transfer>=0.1.9"]
 
@@ -94,8 +96,7 @@ def hf_token() -> str | None:
     token = os.environ.get("HF_TOKEN") or os.environ.get("HUGGING_FACE_HUB_TOKEN")
     if token and token.startswith("replace-with"):
         raise SystemExit(
-            "HF_TOKEN is still a placeholder. Set HF_TOKEN to a Hugging Face token that has accepted access "
-            "to google/gemma-3-12b-it-qat-q4_0-unquantized, or run `huggingface-cli login`."
+            "HF_TOKEN is still a placeholder. Set HF_TOKEN to a Hugging Face token, or run `huggingface-cli login`."
         )
     if token:
         return token
@@ -190,7 +191,7 @@ def main() -> None:
     parser.add_argument("--text-model-id", default=DEFAULT_TEXT_MODEL_ID, help="TEXT_MODEL_ID")
     parser.add_argument(
         "--text-model-dir",
-        default="models/text/gemma-3-12b-it-qat-q4_0-unquantized",
+        default="models/text/gemma-3-12b-it-abliterated",
         help="TEXT_MODEL_DIR",
     )
     parser.add_argument(

@@ -10,11 +10,6 @@ pub fn validate_video_request(req: &VideoJobRequest, profile: &str) -> Result<()
     if req.prompt.trim().is_empty() {
         return Err(AppError::BadRequest("prompt is required".into()));
     }
-    if !matches!(req.mode, VideoMode::TextToVideo | VideoMode::ImageToVideo) {
-        return Err(AppError::BadRequest(
-            "this deployment allows only text_to_video and image_to_video so the LTX worker keeps exactly one full dev model on GPU".into(),
-        ));
-    }
     if (req.num_frames - 1) % 8 != 0 {
         return Err(AppError::BadRequest("num_frames must satisfy 8k+1".into()));
     }
@@ -268,6 +263,7 @@ mod tests {
             retake_start_time: None,
             retake_end_time: None,
             enhance_prompt: None,
+            model_variant: None,
             extra: None,
         };
         assert!(validate_video_request(&req, "local_rtx_5090").is_err());
@@ -292,6 +288,7 @@ mod tests {
             retake_start_time: None,
             retake_end_time: None,
             enhance_prompt: None,
+            model_variant: None,
             extra: None,
         }
     }
@@ -329,10 +326,11 @@ mod tests {
     }
 
     #[test]
-    fn rejects_h200_distilled_mode() {
+    fn rejects_h200_distilled_mode_over_frame_budget() {
+        // 241 frames exceeds H200 max of 121 — rejected by budget, not by mode
         let req = base_request(VideoMode::Distilled, 1024, 576, 241);
         let err = validate_video_request(&req, "cloud_h200").unwrap_err();
-        assert!(err.to_string().contains("exactly one full dev model"));
+        assert!(err.to_string().contains("H200 full 22B bf16"));
     }
 
     #[test]
@@ -348,10 +346,10 @@ mod tests {
     }
 
     #[test]
-    fn rejects_h100_distilled_mode() {
+    fn accepts_h100_distilled_mode_as_upscaled() {
+        // 1024x576@121f on H100 is accepted as upscaled output (within 4K output limit)
         let req = base_request(VideoMode::Distilled, 1024, 576, 121);
-        let err = validate_video_request(&req, "cloud_h100").unwrap_err();
-        assert!(err.to_string().contains("exactly one full dev model"));
+        assert!(validate_video_request(&req, "cloud_h100").is_ok());
     }
 
     #[test]
@@ -379,9 +377,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_distilled_when_full_dev_only() {
+    fn accepts_distilled_mode_with_valid_budget() {
+        // Distilled mode is now allowed; model selection via model_variant field
         let req = base_request(VideoMode::Distilled, 768, 448, 121);
-        let err = validate_video_request(&req, "cloud_h200").unwrap_err();
-        assert!(err.to_string().contains("exactly one full dev model"));
+        assert!(validate_video_request(&req, "cloud_h200").is_ok());
     }
 }

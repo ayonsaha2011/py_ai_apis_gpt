@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(//c/Users/ayons/AppData/Local/Temp/claude/projects/c--Users-ayons-Documents-Workspace-ai-apis-py-ai-apis-gpt/399c6f22-2fc1-417b-947f-761448f27279/tool-results/**)",
+      "Read(//c/Users/ayons/Documents/Workspace/ai-apis/py_apis/video_service/**)",
+      "Read(//c/Users/ayons/Documents/Workspace/ai-apis/py_apis/text_service/**)",
+      "Read(//c/Users/ayons/Documents/Workspace/ai-apis/py_apis/video_service/app/**)",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\ayons\\\\Documents\\\\Workspace\\\\ai-apis\\\\py_ai_apis_gpt\\\\services\\\\text-worker\\\\app\\\\\" -Recurse -Filter \"*.py\" | Select-Object -ExpandProperty FullName)"
+    ]
+  }
+}

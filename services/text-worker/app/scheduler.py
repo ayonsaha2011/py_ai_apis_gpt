@@ -141,6 +141,49 @@ class GenerationScheduler:
     def model_loaded(self) -> bool:
         return self.model is not None and self.tokenizer is not None
 
+    async def encode(self, texts: list[str]) -> list[dict]:
+        if not self.model_loaded():
+            raise RuntimeError("text model is not loaded")
+        return await asyncio.to_thread(self._encode_sync, texts)
+
+    def _encode_sync(self, texts: list[str]) -> list[dict]:
+        import base64
+        import numpy as np
+
+        assert self.model is not None and self.tokenizer is not None
+        enc = self.tokenizer(
+            texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=settings.max_input_tokens,
+        )
+        input_ids = enc["input_ids"].to(self.device)
+        attention_mask = enc["attention_mask"].to(self.device)
+        # Pad sequence length to multiple of 128 (LTX learnable registers requirement)
+        seq_len = input_ids.shape[1]
+        pad_to = ((seq_len + 127) // 128) * 128
+        if pad_to > seq_len:
+            pad_size = pad_to - seq_len
+            id_pad = torch.zeros(len(texts), pad_size, dtype=input_ids.dtype, device=self.device)
+            mask_pad = torch.zeros(len(texts), pad_size, dtype=attention_mask.dtype, device=self.device)
+            input_ids = torch.cat([input_ids, id_pad], dim=1)
+            attention_mask = torch.cat([attention_mask, mask_pad], dim=1)
+        with torch.inference_mode():
+            out = self.model(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True)
+        results = []
+        for i in range(len(texts)):
+            hs = torch.stack([h[i].float().cpu() for h in out.hidden_states])  # [L, seq_len, D]
+            mask = attention_mask[i].cpu()
+            arr = hs.numpy()
+            results.append({
+                "hidden_states": base64.b64encode(arr.tobytes()).decode(),
+                "shape": list(arr.shape),
+                "seq_len": int(mask.sum().item()),
+                "attention_mask": base64.b64encode(mask.numpy().astype(np.int64).tobytes()).decode(),
+            })
+        return results
+
     def assert_serves_model(self, model_id: str | None) -> None:
         if model_id and model_id != self.model_id:
             raise ValueError(

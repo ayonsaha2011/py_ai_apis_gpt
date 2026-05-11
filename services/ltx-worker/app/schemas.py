@@ -35,6 +35,7 @@ class VideoRequest(BaseModel):
     retake_start_time: float | None = None
     retake_end_time: float | None = None
     enhance_prompt: bool | None = False
+    model_variant: str | None = None  # "distilled" | "full_fp8" | "full_bf16"
     extra: dict[str, Any] | None = None
 
 

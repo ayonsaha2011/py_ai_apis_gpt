@@ -77,8 +77,17 @@ type VideoExample = {
   cfg: string;
 };
 
+type ModelVariant = "distilled" | "full_fp8" | "full_bf16";
+
+const modelVariants: { value: ModelVariant; label: string; description: string; defaultSteps: number }[] = [
+  { value: "distilled", label: "Distilled", description: "Fast · 4–8 steps", defaultSteps: 8 },
+  { value: "full_fp8", label: "Full FP8", description: "Balanced · 40 steps", defaultSteps: 40 },
+  { value: "full_bf16", label: "Full BF16", description: "Quality · 40 steps", defaultSteps: 40 },
+];
+
 type VideoForm = {
   mode: VideoMode;
+  modelVariant: ModelVariant;
   width: string;
   height: string;
   duration: string;
@@ -311,11 +320,12 @@ function defaultVideoForm(profile: string): VideoForm {
   const b200 = profile.toLowerCase().includes("b200");
   return {
     mode: "text_to_video",
+    modelVariant: "distilled",
     width: b200 ? "1920" : "1024",
     height: b200 ? "1088" : "576",
     duration: b200 ? "20" : "5",
     frames: b200 ? "481" : "121",
-    steps: "40",
+    steps: "8",
     cfg: "7.5",
     seedHint: "",
     enhancePrompt: false,
@@ -861,6 +871,7 @@ function VideoPage({
       num_inference_steps: Number(form.steps),
       guidance_scale: Number(form.cfg),
       enhance_prompt: form.enhancePrompt,
+      model_variant: form.modelVariant,
     };
     if (form.seedHint) payload.seed_hint = Number(form.seedHint);
     if (form.imageUrl) payload.image_url = form.imageUrl;
@@ -948,6 +959,29 @@ function VideoPage({
                       onClick={() => patch("mode", mode)}
                     >
                       {modeLabels[mode]}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-muted">Model</div>
+                <div className="grid grid-cols-3 gap-2">
+                  {modelVariants.map((v) => (
+                    <button
+                      key={v.value}
+                      type="button"
+                      className={`flex flex-col items-start rounded-md border px-3 py-2 text-left transition ${
+                        form.modelVariant === v.value
+                          ? "border-ocean bg-ocean text-white shadow-panel"
+                          : "border-line bg-white text-ink hover:border-ocean hover:text-ocean"
+                      }`}
+                      onClick={() => {
+                        patch("modelVariant", v.value);
+                        patch("steps", String(v.defaultSteps));
+                      }}
+                    >
+                      <span className="text-sm font-semibold">{v.label}</span>
+                      <span className={`text-xs ${form.modelVariant === v.value ? "text-blue-100" : "text-muted"}`}>{v.description}</span>
                     </button>
                   ))}
                 </div>

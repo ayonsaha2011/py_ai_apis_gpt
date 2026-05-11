@@ -115,6 +115,7 @@ pub struct VideoJobRequest {
     pub retake_start_time: Option<f32>,
     pub retake_end_time: Option<f32>,
     pub enhance_prompt: Option<bool>,
+    pub model_variant: Option<String>,
     pub extra: Option<serde_json::Value>,
 }
 

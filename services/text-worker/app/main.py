@@ -69,6 +69,26 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
     return JSONResponse(status_code=500, content={"detail": "internal text-worker error; see server logs"})
 
 
+@app.post("/encode")
+async def encode(body: dict, x_service_key: str | None = Header(default=None)) -> dict:
+    _check_service_key(x_service_key)
+    texts = body.get("texts")
+    if not isinstance(texts, list) or not texts:
+        raise HTTPException(status_code=422, detail="texts must be a non-empty list")
+    if len(texts) > 32:
+        raise HTTPException(status_code=422, detail="at most 32 texts per request")
+    if not all(isinstance(t, str) for t in texts):
+        raise HTTPException(status_code=422, detail="all texts must be strings")
+    if not scheduler.model_loaded():
+        raise HTTPException(status_code=503, detail="text model not yet loaded")
+    try:
+        embeddings = await scheduler.encode(texts)
+    except Exception as exc:
+        logger.error("encode failed texts=%d", len(texts), exc_info=True)
+        raise HTTPException(status_code=500, detail="encode failed; see text-worker logs") from exc
+    return {"embeddings": embeddings}
+
+
 @app.get("/health")
 async def health() -> dict:
     return {

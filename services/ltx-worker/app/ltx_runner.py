@@ -5,12 +5,12 @@ import gc
 import logging
 import os
 import threading
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+import httpx
 import torch
 
 from .config import settings
@@ -27,7 +27,12 @@ B200_OVERHEAD_BYTES = 10 * 1024**3
 SAFETY_BYTES = 6 * 1024**3
 
 _PRECISION_READY = False
+_PATCH_APPLIED = False
 _PIPELINE_LOAD_LOCK = threading.Lock()
+
+# One active pipeline at a time
+_active_pipeline: Any | None = None
+_active_variant: str | None = None
 
 
 def _files() -> dict[str, str]:
@@ -46,16 +51,16 @@ def _gemma_root() -> str:
     return str(settings.gemma_root or (settings.ltx_model_dir / "gemma-3-12b"))
 
 
-def _quantization() -> dict[str, Any]:
-    if settings.quantization == "none":
+def _quantization_for(name: str) -> dict[str, Any]:
+    if name == "none":
         return {}
     from ltx_core.quantization import QuantizationPolicy
 
-    if settings.quantization == "fp8_cast":
+    if name == "fp8_cast":
         return {"quantization": QuantizationPolicy.fp8_cast()}
-    if settings.quantization == "fp8_scaled_mm":
+    if name == "fp8_scaled_mm":
         return {"quantization": QuantizationPolicy.fp8_scaled_mm()}
-    raise ValueError(f"unsupported quantization {settings.quantization}")
+    raise ValueError(f"unsupported quantization {name}")
 
 
 def _device() -> torch.device:
@@ -86,9 +91,8 @@ def runtime_status() -> dict[str, Any]:
         "torch_version": torch.__version__,
         "torch_cuda": torch.version.cuda,
         "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-        "pipeline_one_stage_built": _one_stage_pipeline.cache_info().currsize > 0,
-        "pipeline_two_stage_built": _two_stage_pipeline.cache_info().currsize > 0,
-        "singleton_pipeline": "one_stage_full_dev",
+        "active_variant": _active_variant,
+        "pipeline_loaded": _active_pipeline is not None,
         "preload_on_start": settings.preload_on_start,
         "max_num_frames": settings.max_num_frames,
         "max_tokens": _max_tokens(),
@@ -100,9 +104,10 @@ def is_cuda_oom(exc: BaseException) -> bool:
 
 
 def release_cuda_memory(clear_pipelines: bool = False) -> None:
+    global _active_pipeline, _active_variant
     if clear_pipelines:
-        _two_stage_pipeline.cache_clear()
-        _one_stage_pipeline.cache_clear()
+        _active_pipeline = None
+        _active_variant = None
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -115,6 +120,7 @@ def release_cuda_memory(clear_pipelines: bool = False) -> None:
 def _patch_image_processor_fast() -> None:
     try:
         import transformers
+
         original = transformers.AutoImageProcessor.from_pretrained.__func__
 
         def _use_fast(cls: Any, *args: Any, **kwargs: Any) -> Any:
@@ -126,6 +132,16 @@ def _patch_image_processor_fast() -> None:
         logger.debug("Could not patch AutoImageProcessor.from_pretrained", exc_info=True)
 
 
+def _apply_patch_once() -> None:
+    global _PATCH_APPLIED
+    if _PATCH_APPLIED:
+        return
+    from .ltx_patch.patch import apply_patch
+
+    apply_patch(settings.text_worker_url, torch.device(settings.cuda_device))
+    _PATCH_APPLIED = True
+
+
 def ensure_runtime_ready() -> None:
     global _PRECISION_READY
     if settings.cuda_device.startswith("cuda") and not torch.cuda.is_available():
@@ -134,6 +150,7 @@ def ensure_runtime_ready() -> None:
             "Install the locked CUDA PyTorch environment with Python 3.12, then restart the worker."
         )
     if not _PRECISION_READY and torch.cuda.is_available():
+        _apply_patch_once()
         _patch_image_processor_fast()
         torch.set_float32_matmul_precision("high")
         torch.backends.cuda.matmul.allow_tf32 = True
@@ -158,14 +175,10 @@ def _token_count(width: int, height: int, num_frames: int) -> int:
 
 
 def _required_bytes(tokens: int) -> int:
-    weight_bytes = 0 if _single_pipeline_loaded() else WEIGHT_BYTES
+    weight_bytes = 0 if _active_pipeline is not None else WEIGHT_BYTES
     if "b200" in settings.gpu_profile.lower():
         return weight_bytes + tokens * B200_PER_TOKEN_ACT_BYTES + B200_OVERHEAD_BYTES
     return weight_bytes + tokens * PER_TOKEN_ACT_BYTES + OVERHEAD_BYTES
-
-
-def _single_pipeline_loaded() -> bool:
-    return _one_stage_pipeline.cache_info().currsize > 0
 
 
 def _suggest_native(num_frames: int, cap: int, aspect: float = 16 / 9) -> tuple[int, int]:
@@ -217,7 +230,7 @@ def validate_ltx_budget(req: VideoRequest) -> None:
     if req.mode not in {VideoMode.text_to_video, VideoMode.image_to_video}:
         raise ValueError(
             "this LTX worker allows only text_to_video and image_to_video; "
-            "distilled and specialized modes are disabled so the worker keeps one full dev model on GPU"
+            "use model_variant to select distilled/full_fp8/full_bf16"
         )
     if req.num_frames < 1 or (req.num_frames - 1) % 8 != 0:
         raise ValueError("num_frames must satisfy 8k+1")
@@ -259,76 +272,77 @@ def validate_ltx_budget(req: VideoRequest) -> None:
             )
 
 
+def _resolve_variant(req: VideoRequest | None) -> str:
+    raw = (req.model_variant if req is not None else None) or settings.ltx_default_variant or "distilled"
+    return raw if raw in {"distilled", "full_fp8", "full_bf16"} else "distilled"
+
+
+def _build_pipeline(variant: str) -> Any:
+    from ltx_pipelines.ti2vid_one_stage import TI2VidOneStagePipeline
+
+    if variant == "distilled":
+        try:
+            checkpoint = _pick(settings.ltx_distilled_checkpoint, "ltx-2.3-22b-distilled.safetensors")
+        except FileNotFoundError:
+            logger.warning(
+                "distilled checkpoint not found (tried %s); falling back to full_bf16",
+                settings.ltx_distilled_checkpoint,
+            )
+            return _build_pipeline("full_bf16")
+        quant: dict[str, Any] = {}
+    elif variant == "full_fp8":
+        checkpoint = _pick("ltx-2.3-22b-dev.safetensors")
+        quant = _quantization_for("fp8_cast")
+    else:  # full_bf16
+        checkpoint = _pick("ltx-2.3-22b-dev.safetensors")
+        quant = {}
+
+    logger.info("ltx_runner loading pipeline variant=%s checkpoint=%s", variant, checkpoint)
+    return TI2VidOneStagePipeline(
+        checkpoint_path=checkpoint,
+        gemma_root=_gemma_root(),  # intercepted by ltx_patch; value unused
+        loras=[],
+        device=_device(),
+        torch_compile=settings.torch_compile_ltx,
+        **quant,
+    )
+
+
+def _switch_pipeline(variant: str) -> tuple[Any, str]:
+    global _active_pipeline, _active_variant
+    with _PIPELINE_LOAD_LOCK:
+        if _active_variant == variant and _active_pipeline is not None:
+            return _active_pipeline, variant
+        if _active_pipeline is not None:
+            logger.info("ltx_runner unloading pipeline variant=%s to load variant=%s", _active_variant, variant)
+            _active_pipeline = None
+            _active_variant = None
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        pipeline = _build_pipeline(variant)
+        _active_pipeline = pipeline
+        _active_variant = variant
+        return pipeline, variant
+
+
+def _select_pipeline(req: VideoRequest | None = None) -> tuple[Any, str]:
+    return _switch_pipeline(_resolve_variant(req))
+
+
 def preload_ltx_models() -> dict[str, Any]:
     ensure_runtime_ready()
-    pipeline, pipeline_kind = _select_pipeline()
+    variant = _resolve_variant(None)
+    pipeline, pipeline_kind = _switch_pipeline(variant)
     status = runtime_status()
     logger.info(
-        "LTX singleton pipeline ready pipeline=%s loaded=%s gpu_free_gib=%s gpu_total_gib=%s",
+        "LTX pipeline ready variant=%s loaded=%s gpu_free_gib=%s gpu_total_gib=%s",
         pipeline_kind,
         pipeline is not None,
         status["vram_free_gib"],
         status["vram_total_gib"],
     )
     return {"pipeline": pipeline_kind, "runtime": status}
-
-
-@lru_cache(maxsize=1)
-def _two_stage_pipeline() -> Any:
-    from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
-
-    return TI2VidTwoStagesPipeline(
-        checkpoint_path=_pick("ltx-2.3-22b-dev.safetensors"),
-        distilled_lora=[],
-        spatial_upsampler_path=_pick(
-            "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
-            "ltx-2.3-spatial-upscaler-x1.5-1.0.safetensors",
-        ),
-        gemma_root=_gemma_root(),
-        loras=[],
-        device=_device(),
-        torch_compile=settings.torch_compile_ltx,
-        **_quantization(),
-    )
-
-
-@lru_cache(maxsize=1)
-def _one_stage_pipeline() -> Any:
-    from ltx_pipelines.ti2vid_one_stage import TI2VidOneStagePipeline
-
-    logger.info(
-        "loading singleton LTX full dev one-stage pipeline checkpoint=%s gemma_root=%s quantization=%s device=%s",
-        _pick("ltx-2.3-22b-dev.safetensors"),
-        _gemma_root(),
-        settings.quantization,
-        settings.cuda_device,
-    )
-    return TI2VidOneStagePipeline(
-        checkpoint_path=_pick("ltx-2.3-22b-dev.safetensors"),
-        gemma_root=_gemma_root(),
-        loras=[],
-        device=_device(),
-        torch_compile=settings.torch_compile_ltx,
-        **_quantization(),
-    )
-
-
-def _use_one_stage(_req: VideoRequest) -> bool:
-    # Two-stage loads the transformer for stage-1 then again for stage-2; the
-    # window where both instances are simultaneously resident peaks at ~88 GB
-    # (2 × 44 GB transformer) plus spatial-upsampler weights, which with the
-    # text-worker co-tenant (~22 GB) pushes past H200 141 GB for any request.
-    # One-stage uses a single transformer load (~44 GB) and no upsampler.
-    return True
-
-
-def _select_pipeline(_req: VideoRequest | None = None) -> tuple[Any, str]:
-    return _singleton_one_stage_pipeline(), "one_stage"
-
-
-def _singleton_one_stage_pipeline() -> Any:
-    with _PIPELINE_LOAD_LOCK:
-        return _one_stage_pipeline()
 
 
 def _tiling_for(width: int, height: int, frames: int) -> Any:
@@ -349,6 +363,36 @@ def _tiling_for(width: int, height: int, frames: int) -> Any:
     return TilingConfig.default()
 
 
+def _enhance_prompt(prompt: str) -> str:
+    system = (
+        "You are a video prompt enhancer. Rewrite the user's prompt to be more vivid, "
+        "cinematic, and descriptive for AI video generation. "
+        "Return only the enhanced prompt, no commentary or explanation."
+    )
+    try:
+        resp = httpx.post(
+            f"{settings.text_worker_url}/v1/chat/completions",
+            json={
+                "model": "default",
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": prompt},
+                ],
+                "max_tokens": 512,
+                "temperature": 0.7,
+                "stream": False,
+            },
+            timeout=30.0,
+        )
+        resp.raise_for_status()
+        enhanced = resp.json()["choices"][0]["message"]["content"].strip()
+        logger.info("enhance_prompt original=%r enhanced=%r", prompt[:80], enhanced[:80])
+        return enhanced
+    except Exception:
+        logger.warning("enhance_prompt failed; using original prompt", exc_info=True)
+        return prompt
+
+
 async def run_ltx_job(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> tuple[Path, dict[str, Any]]:
     job_dir = output_path.parent
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -365,8 +409,13 @@ def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> t
     images = _image_conditionings(req)
     fps = req.frame_rate or 24.0
 
+    # Pre-enhance prompt via text-worker before calling pipeline
+    prompt = req.prompt
+    if req.enhance_prompt:
+        prompt = _enhance_prompt(prompt)
+
     logger.info(
-        "ltx_runner job=%s pipeline=%s %sx%s@%sf tokens=%s",
+        "ltx_runner job=%s variant=%s %sx%s@%sf tokens=%s",
         job_id, pipeline_kind, req.width, req.height, req.num_frames,
         _token_count(req.width, req.height, req.num_frames),
     )
@@ -374,7 +423,7 @@ def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> t
     try:
         with torch.inference_mode():
             video, audio = pipeline(
-                prompt=req.prompt,
+                prompt=prompt,
                 negative_prompt=req.negative_prompt or "",
                 seed=seed,
                 height=req.height,
@@ -386,7 +435,7 @@ def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> t
                 audio_guider_params=MultiModalGuiderParams(),
                 images=images,
                 tiling_config=tiling,
-                enhance_prompt=bool(req.enhance_prompt),
+                enhance_prompt=False,  # already enhanced above
             )
 
         release_cuda_memory()
@@ -420,6 +469,7 @@ def _run_sync(job_id: str, req: VideoRequest, seed: int, output_path: Path) -> t
 
     metadata = {
         "pipeline": pipeline_kind,
+        "variant": pipeline_kind,
         "render_width": req.width,
         "render_height": req.height,
         "output_width": req.width,
