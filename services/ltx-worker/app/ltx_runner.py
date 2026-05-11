@@ -112,6 +112,20 @@ def release_cuda_memory(clear_pipelines: bool = False) -> None:
             pass
 
 
+def _patch_image_processor_fast() -> None:
+    try:
+        import transformers
+        original = transformers.AutoImageProcessor.from_pretrained.__func__
+
+        def _use_fast(cls: Any, *args: Any, **kwargs: Any) -> Any:
+            kwargs.setdefault("use_fast", True)
+            return original(cls, *args, **kwargs)
+
+        transformers.AutoImageProcessor.from_pretrained = classmethod(_use_fast)
+    except Exception:
+        logger.debug("Could not patch AutoImageProcessor.from_pretrained", exc_info=True)
+
+
 def ensure_runtime_ready() -> None:
     global _PRECISION_READY
     if settings.cuda_device.startswith("cuda") and not torch.cuda.is_available():
@@ -120,6 +134,7 @@ def ensure_runtime_ready() -> None:
             "Install the locked CUDA PyTorch environment with Python 3.12, then restart the worker."
         )
     if not _PRECISION_READY and torch.cuda.is_available():
+        _patch_image_processor_fast()
         torch.set_float32_matmul_precision("high")
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
