@@ -7,7 +7,7 @@ It runs native processes instead of Docker for the Python workers so a preinstal
 ## Runtime Contract
 
 - OS: Ubuntu 24.04 x86_64.
-- GPU: NVIDIA H100. Use `scripts/deploy_h200.sh` for H200 servers.
+- GPU: NVIDIA H100. Use `scripts/deploy_h200.sh` for H200 servers or `scripts/deploy_b200.sh` for B200/GB200-class servers.
 - NVIDIA driver: must expose CUDA 12.8 or newer in `nvidia-smi`.
 - Python: 3.12.
 - PyTorch: CUDA build with `torch.cuda.is_available() == True`. The deploy script creates `.venv-h100` with `--system-site-packages` so a preinstalled torch 2.8.0+cu128 runtime remains visible.

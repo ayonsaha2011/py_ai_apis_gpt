@@ -69,6 +69,12 @@ For Ubuntu 24.04 H200 servers, use:
 - `.env.h200.example`
 - `scripts/deploy_h200.sh`
 
-The profiles are separate. H100 defaults to `GATEWAY_PROFILE=cloud_h100`, `.env.h100`, `.venv-h100`, and `runtime/h100`. H200 defaults to `GATEWAY_PROFILE=cloud_h200`, `.env.h200`, `.venv-h200`, and `runtime/h200`.
+For Ubuntu 24.04 B200/GB200-class servers, use:
+
+- `docs/b200-ubuntu-deploy.md`
+- `.env.b200.example`
+- `scripts/deploy_b200.sh`
+
+The profiles are separate. H100 defaults to `GATEWAY_PROFILE=cloud_h100`, `.env.h100`, `.venv-h100`, and `runtime/h100`. H200 defaults to `GATEWAY_PROFILE=cloud_h200`, `.env.h200`, `.venv-h200`, and `runtime/h200`. B200 defaults to `GATEWAY_PROFILE=cloud_b200`, `.env.b200`, `.venv-b200`, and `runtime/b200`, with native `1920x1088@481f` as the default 20-second Full-HD LTX-2.3 dev target.
 
 The first registered user is promoted to `admin` automatically. Additional bootstrap admins can be configured with `ADMIN_EMAILS=email1@example.com,email2@example.com` before registration.

@@ -228,6 +228,33 @@
           }
         },
         {
+          "name": "Create B200 Full-HD 20s Video Job",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "if (pm.response.code === 202) {",
+                  "  const body = pm.response.json();",
+                  "  pm.environment.set('video_job_id', body.job_id);",
+                  "  pm.environment.set('video_r2_key', body.r2_key);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"mode\": \"text_to_video\",\n  \"prompt\": \"A full-HD 20-second continuous cinematic shot inside a futuristic robotics lab, camera slowly tracking from a workbench of precision tools toward a humanoid robot waking under soft blue-white lights, engineers moving naturally in the background, tiny status LEDs pulsing, realistic metal and glass materials, no cuts, smooth controlled dolly movement.\",\n  \"negative_prompt\": \"low quality, flicker, jitter, warped hands, duplicated robot parts, text artifacts, fast cuts, unstable camera\",\n  \"width\": 1920,\n  \"height\": 1088,\n  \"num_frames\": 481,\n  \"frame_rate\": 24,\n  \"guidance_scale\": 7.5,\n  \"num_inference_steps\": 40\n}"
+            },
+            "url": "{{base_url}}/v1/video/jobs"
+          }
+        },
+        {
           "name": "Create 4K Upscaled Video Job",
           "event": [
             {

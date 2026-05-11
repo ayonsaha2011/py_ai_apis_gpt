@@ -4,6 +4,7 @@
 !.env.example
 !.env.h100.example
 !.env.h200.example
+!.env.b200.example
 *.pem
 *.key
 *.crt

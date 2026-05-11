@@ -27,6 +27,11 @@ def _req(width: int, height: int, num_frames: int, mode: VideoMode = VideoMode.t
 
 
 @pytest.fixture
+def b200_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "gpu_profile", "cloud_b200")
+
+
+@pytest.fixture
 def h200_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "gpu_profile", "cloud_h200")
 
@@ -39,6 +44,10 @@ def h100_profile(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture
 def local_profile(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "gpu_profile", "local_rtx_5090")
+
+
+def test_max_tokens_b200(b200_profile: None) -> None:
+    assert _max_tokens() == settings.max_tokens_b200
 
 
 def test_max_tokens_per_profile(h200_profile: None) -> None:
@@ -55,8 +64,18 @@ def test_max_tokens_local(local_profile: None) -> None:
 
 def test_token_count_formula() -> None:
     assert _token_count(1408, 768, 481) == 61 * 96 * 176
+    assert _token_count(1920, 1088, 481) == 61 * 136 * 240
     assert _token_count(1920, 1088, 121) == 16 * 136 * 240
     assert _token_count(768, 448, 121) == 16 * 56 * 96
+
+
+def test_b200_accepts_20s_full_hd(b200_profile: None) -> None:
+    validate_ltx_budget(_req(1920, 1088, 481))
+
+
+def test_b200_rejects_20s_1440p(b200_profile: None) -> None:
+    with pytest.raises(ValueError, match="exceeds"):
+        validate_ltx_budget(_req(2560, 1440, 481))
 
 
 def test_h200_accepts_20s_at_1408x768(h200_profile: None) -> None:

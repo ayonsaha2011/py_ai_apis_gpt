@@ -51,6 +51,7 @@ const resolutionPresets = [
   { label: "SD wide", width: "768", height: "448" },
   { label: "HD", width: "1024", height: "576" },
   { label: "H200 20s", width: "1408", height: "768" },
+  { label: "B200 Full-HD 20s", width: "1920", height: "1088" },
   { label: "Full-HD 5s", width: "1920", height: "1088" },
   { label: "Square", width: "768", height: "768" },
   { label: "Portrait", width: "576", height: "1024" },
@@ -189,6 +190,19 @@ const videoExamples: VideoExample[] = [
     negative: "cartoon look, harsh camera shake, warped balcony rails, noisy water, flicker, oversaturated sky, low quality fabric",
   },
   {
+    title: "B200 Full-HD 20s",
+    mode: "text_to_video",
+    width: "1920",
+    height: "1088",
+    duration: "20",
+    frames: "481",
+    steps: "40",
+    cfg: "7.5",
+    prompt:
+      "A full-HD 20-second continuous cinematic shot inside a futuristic robotics lab, camera slowly tracking from a workbench of precision tools toward a humanoid robot waking under soft blue-white lights, engineers moving naturally in the background, tiny status LEDs pulsing, realistic metal and glass materials, no cuts, smooth controlled dolly movement.",
+    negative: "low quality, flicker, jitter, warped hands, duplicated robot parts, text artifacts, fast cuts, unstable camera",
+  },
+  {
     title: "H200 20s scene",
     mode: "text_to_video",
     width: "1408",
@@ -243,7 +257,7 @@ function _tokenCount(width: number, height: number, frames: number): number {
 
 function _maxTokens(profile: string): number {
   const p = profile.toLowerCase();
-  if (p.includes("b200")) return 2_580_000;
+  if (p.includes("b200")) return 2_100_000;
   if (p.includes("h200")) return 1_770_000;
   if (p.includes("h100")) return 540_000;
   return 140_000;
@@ -276,7 +290,7 @@ function videoBudgetWarning(form: VideoForm, profile: string): string {
   const cap = _maxTokens(profile);
   if (tokens > cap) {
     const [sw, sh] = _suggestNative(frames, cap);
-    return `${width}×${height}@${frames}f exceeds ${profile || "GPU"} capacity (${tokens.toLocaleString()} > ${cap.toLocaleString()} tokens). Suggested: ${sw}×${sh}@${frames}f`;
+    return `${width}x${height}@${frames}f exceeds ${profile || "GPU"} capacity (${tokens.toLocaleString()} > ${cap.toLocaleString()} tokens). Suggested: ${sw}x${sh}@${frames}f`;
   }
   return "";
 }
@@ -291,6 +305,29 @@ function videoSizeValid(form: VideoForm, _profile: string): boolean {
   const height = Number(form.height);
   if (!Number.isFinite(width) || !Number.isFinite(height)) return false;
   return width % 32 === 0 && height % 32 === 0;
+}
+
+function defaultVideoForm(profile: string): VideoForm {
+  const b200 = profile.toLowerCase().includes("b200");
+  return {
+    mode: "text_to_video",
+    width: b200 ? "1920" : "1024",
+    height: b200 ? "1088" : "576",
+    duration: b200 ? "20" : "5",
+    frames: b200 ? "481" : "121",
+    steps: "40",
+    cfg: "7.5",
+    seedHint: "",
+    enhancePrompt: false,
+    imageUrl: "",
+    videoUrl: "",
+    audioUrl: "",
+    keyframes: "",
+    retakeStart: "",
+    retakeEnd: "",
+    prompt: "",
+    negative: "",
+  };
 }
 
 function App() {
@@ -743,25 +780,7 @@ function VideoPage({
   profile: string;
   notify: (message: string) => void;
 }) {
-  const [form, setForm] = useState<VideoForm>({
-    mode: "text_to_video",
-    width: "1024",
-    height: "576",
-    duration: "5",
-    frames: "121",
-    steps: "40",
-    cfg: "7.5",
-    seedHint: "",
-    enhancePrompt: false,
-    imageUrl: "",
-    videoUrl: "",
-    audioUrl: "",
-    keyframes: "",
-    retakeStart: "",
-    retakeEnd: "",
-    prompt: "",
-    negative: "",
-  });
+  const [form, setForm] = useState<VideoForm>(() => defaultVideoForm(profile));
   const [jobs, setJobs] = useState<VideoJob[]>(() => {
     const stored = localStorage.getItem("videoJobs");
     return stored ? (JSON.parse(stored) as VideoJob[]) : [];
@@ -781,6 +800,14 @@ function VideoPage({
       setForm((current) => ({ ...current, duration: "5", frames: "121" }));
     }
   }, [form.duration, profile]);
+
+  useEffect(() => {
+    if (!profile.toLowerCase().includes("b200")) return;
+    if (form.prompt || form.negative || form.seedHint) return;
+    if (form.width === "1024" && form.height === "576" && form.duration === "5" && form.frames === "121") {
+      setForm(defaultVideoForm(profile));
+    }
+  }, [form.duration, form.frames, form.height, form.negative, form.prompt, form.seedHint, form.width, profile]);
 
   function patch<K extends keyof VideoForm>(key: K, value: VideoForm[K]) {
     setForm((current) => ({ ...current, [key]: value }));
@@ -811,25 +838,7 @@ function VideoPage({
   }
 
   function resetForm() {
-    setForm({
-      mode: "text_to_video",
-      width: "1024",
-      height: "576",
-      duration: "5",
-      frames: "121",
-      steps: "40",
-      cfg: "7.5",
-      seedHint: "",
-      enhancePrompt: false,
-      imageUrl: "",
-      videoUrl: "",
-      audioUrl: "",
-      keyframes: "",
-      retakeStart: "",
-      retakeEnd: "",
-      prompt: "",
-      negative: "",
-    });
+    setForm(defaultVideoForm(profile));
   }
 
   async function submit(event: FormEvent) {

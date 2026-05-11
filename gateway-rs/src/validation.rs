@@ -133,9 +133,23 @@ struct LtxBudget {
 
 fn ltx_budget(profile: &str) -> LtxBudget {
     let profile = profile.to_ascii_lowercase();
+    let b200 = profile.contains("b200");
     let h200 = profile.contains("h200");
     let h100 = profile.contains("h100");
 
+    if b200 {
+        return LtxBudget {
+            max_native_side: 2048,
+            max_frames: 481,
+            max_pixel_frames: 1920 * 1088 * 481,
+            max_output_side: 4096,
+            max_output_pixels: 4096 * 2160,
+            max_upscaled_frames: 121,
+            label: "B200 full 22B bf16 LTX",
+            guidance:
+                "use native 20 seconds at 1920x1088, or 4K output via upscale for 5-second jobs",
+        };
+    }
     if h200 {
         return LtxBudget {
             max_native_side: 1536,
@@ -286,6 +300,25 @@ mod tests {
     fn accepts_h200_full_22b_5s_hd_budget() {
         let req = base_request(VideoMode::TextToVideo, 1024, 576, 121);
         assert!(validate_video_request(&req, "cloud_h200").is_ok());
+    }
+
+    #[test]
+    fn accepts_b200_full_22b_20s_full_hd_budget() {
+        let req = base_request(VideoMode::TextToVideo, 1920, 1088, 481);
+        assert!(validate_video_request(&req, "cloud_b200").is_ok());
+    }
+
+    #[test]
+    fn rejects_b200_full_22b_20s_1440p_budget() {
+        let req = base_request(VideoMode::TextToVideo, 2560, 1440, 481);
+        let err = validate_video_request(&req, "cloud_b200").unwrap_err();
+        assert!(err.to_string().contains("B200 full 22B bf16"));
+    }
+
+    #[test]
+    fn accepts_b200_4k_upscaled_5s_budget() {
+        let req = base_request(VideoMode::TextToVideo, 3840, 2160, 121);
+        assert!(validate_video_request(&req, "cloud_b200").is_ok());
     }
 
     #[test]

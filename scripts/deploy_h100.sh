@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# H100 Ubuntu 24.04 deployment and operations script.
+# Cloud GPU Ubuntu 24.04 deployment and operations script.
 # Target image: preinstalled CUDA PyTorch, for example torch 2.8.0+cu128 on CUDA 12.8.
 # Usage:
 #   bash scripts/deploy_h100.sh deploy [--skip-models] [--skip-apt] [--skip-python-deps] [--install-pytorch] [--hf-token TOKEN]
@@ -45,8 +45,8 @@ Default deploy action:
   model cache, frontend build, production gateway build, full checks.
 
 Environment:
-  AI_ENV_FILE       Defaults to .env.h100
-  AI_VENV_DIR       Defaults to .venv-h100
+  AI_ENV_FILE       Defaults to .env.h100; deploy_h200/deploy_b200 set profile-specific env files
+  AI_VENV_DIR       Defaults to .venv-h100; deploy_h200/deploy_b200 set profile-specific venvs
   AI_PYTHON_BIN     Defaults to python3.12
   QDRANT_BIN        Defaults to /opt/qdrant/qdrant
   QDRANT_VERSION    Defaults to 1.11.0
@@ -201,7 +201,9 @@ create_env_file() {
     return
   fi
   local template="$ROOT_DIR/.env.h100.example"
-  if [[ "$ENV_FILE" == *".env.h200" && -f "$ROOT_DIR/.env.h200.example" ]]; then
+  if [[ "$ENV_FILE" == *".env.b200" && -f "$ROOT_DIR/.env.b200.example" ]]; then
+    template="$ROOT_DIR/.env.b200.example"
+  elif [[ "$ENV_FILE" == *".env.h200" && -f "$ROOT_DIR/.env.h200.example" ]]; then
     template="$ROOT_DIR/.env.h200.example"
   fi
   info "Creating $ENV_FILE from $(basename "$template")..."
@@ -426,8 +428,10 @@ check_gpu() {
   require_cmd nvidia-smi
   local names
   names="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || true)"
-  local expected="H100|H200"
-  if [[ "${GATEWAY_PROFILE:-}" == *"h200"* ]]; then
+  local expected="H100|H200|B200|GB200|Blackwell"
+  if [[ "${GATEWAY_PROFILE:-}" == *"b200"* ]]; then
+    expected="B200|GB200|Blackwell"
+  elif [[ "${GATEWAY_PROFILE:-}" == *"h200"* ]]; then
     expected="H200"
   elif [[ "${GATEWAY_PROFILE:-}" == *"h100"* ]]; then
     expected="H100"
@@ -463,7 +467,7 @@ if not torch.cuda.is_available():
 name = torch.cuda.get_device_name(0)
 print(f"gpu0={name}")
 profile = os.environ.get("GATEWAY_PROFILE", "cloud_h100").lower()
-expected = ("H200",) if "h200" in profile else ("H100",) if "h100" in profile else ("H100", "H200")
+expected = ("B200", "GB200", "Blackwell") if "b200" in profile else ("H200",) if "h200" in profile else ("H100",) if "h100" in profile else ("H100", "H200", "B200", "GB200", "Blackwell")
 if not any(item in name for item in expected):
     raise SystemExit(f"Expected {' or '.join(expected)} GPU for GATEWAY_PROFILE={profile}, got {name}")
 if not str(torch.version.cuda or "").startswith("12.8"):

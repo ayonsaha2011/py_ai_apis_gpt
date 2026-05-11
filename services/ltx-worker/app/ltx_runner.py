@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 
 WEIGHT_BYTES = 44 * 1024**3
 PER_TOKEN_ACT_BYTES = 48 * 1024
+B200_PER_TOKEN_ACT_BYTES = 32 * 1024
 OVERHEAD_BYTES = 12 * 1024**3
+B200_OVERHEAD_BYTES = 10 * 1024**3
 SAFETY_BYTES = 6 * 1024**3
 
 _PRECISION_READY = False
@@ -127,6 +129,8 @@ def ensure_runtime_ready() -> None:
 
 def _max_tokens() -> int:
     profile = settings.gpu_profile.lower()
+    if "b200" in profile:
+        return settings.max_tokens_b200
     if "h200" in profile:
         return settings.max_tokens_h200
     if "h100" in profile:
@@ -140,6 +144,8 @@ def _token_count(width: int, height: int, num_frames: int) -> int:
 
 def _required_bytes(tokens: int) -> int:
     weight_bytes = 0 if _single_pipeline_loaded() else WEIGHT_BYTES
+    if "b200" in settings.gpu_profile.lower():
+        return weight_bytes + tokens * B200_PER_TOKEN_ACT_BYTES + B200_OVERHEAD_BYTES
     return weight_bytes + tokens * PER_TOKEN_ACT_BYTES + OVERHEAD_BYTES
 
 
@@ -172,10 +178,13 @@ def current_budget_hint() -> dict[str, Any]:
     profile = settings.gpu_profile.lower()
     cap = _max_tokens()
     examples = {
+        "b200": "1920x1088@481f (20s), 2560x1440@241f (10s), 3840x2160@121f (5s output)",
         "h200": "1408x768@481f (20s), 1664x928@241f (10s), 1920x1088@121f (5s)",
         "h100": "768x448@481f (20s), 1024x576@241f (10s), 1280x704@121f (5s)",
     }
-    if "h200" in profile:
+    if "b200" in profile:
+        example = examples["b200"]
+    elif "h200" in profile:
         example = examples["h200"]
     elif "h100" in profile:
         example = examples["h100"]
@@ -217,7 +226,8 @@ def validate_ltx_budget(req: VideoRequest) -> None:
             f"{req.width}x{req.height}@{req.num_frames}f exceeds {settings.gpu_profile} "
             f"single-shot capacity ({tokens} > {cap} tokens). "
             f"Suggested native at this duration: {suggested_w}x{suggested_h}@{req.num_frames}f. "
-            f"For other durations on H200: 1664x928@241f, 1920x1088@121f."
+            f"For other durations on B200: 1920x1088@481f, 2560x1440@241f. "
+            f"For H200: 1408x768@481f, 1920x1088@121f."
         )
 
     if torch.cuda.is_available():

@@ -262,12 +262,12 @@ components:
           type: string
         width:
           type: integer
-          description: Output width. 4K is output-only upscale unless future profiles allow native 4K.
+          description: Output width. B200 supports native 1920x1088 at 481 frames; 4K is output-only upscale.
         height:
           type: integer
         num_frames:
           type: integer
-          description: Must satisfy 8k+1.
+          description: Must satisfy 8k+1. 481 frames is 20 seconds at 24fps.
         image_url:
           type: string
         video_url:

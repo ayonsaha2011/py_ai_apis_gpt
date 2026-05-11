@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     )
     preload_on_start: bool = Field(default=True, validation_alias=AliasChoices("LTX_PRELOAD_ON_START"))
     clear_pipeline_on_oom: bool = Field(default=False, validation_alias=AliasChoices("LTX_CLEAR_PIPELINE_ON_OOM"))
+    max_tokens_b200: int = Field(default=2_100_000, validation_alias=AliasChoices("LTX_MAX_TOKENS_B200"))
     max_tokens_h200: int = Field(default=1_770_000, validation_alias=AliasChoices("LTX_MAX_TOKENS_H200"))
     max_tokens_h100: int = Field(default=540_000, validation_alias=AliasChoices("LTX_MAX_TOKENS_H100"))
     max_tokens_local: int = Field(default=140_000, validation_alias=AliasChoices("LTX_MAX_TOKENS_LOCAL"))

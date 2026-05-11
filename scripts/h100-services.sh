@@ -18,7 +18,7 @@ Usage:
   scripts/h100-services.sh logs    [all|gateway|text|ltx|qdrant] [-f] [-n lines]
 
 Environment:
-  AI_ENV_FILE       Defaults to .env.h100
+  AI_ENV_FILE       Defaults to .env.h100; h200-services/b200-services set profile-specific env files
   AI_PYTHON_MODE    system or uv. system uses AI_PYTHON_BIN.
   AI_PYTHON_BIN     Defaults to python3.12 when AI_PYTHON_MODE=system.
 USAGE
@@ -97,8 +97,10 @@ require_h100_or_h200() {
   require_cmd nvidia-smi
   local names
   names="$(nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null || true)"
-  local expected="H100|H200"
-  if [[ "${GATEWAY_PROFILE:-}" == *"h200"* ]]; then
+  local expected="H100|H200|B200|GB200|Blackwell"
+  if [[ "${GATEWAY_PROFILE:-}" == *"b200"* ]]; then
+    expected="B200|GB200|Blackwell"
+  elif [[ "${GATEWAY_PROFILE:-}" == *"h200"* ]]; then
     expected="H200"
   elif [[ "${GATEWAY_PROFILE:-}" == *"h100"* ]]; then
     expected="H100"
@@ -129,7 +131,7 @@ if not torch.cuda.is_available():
 name = torch.cuda.get_device_name(0)
 print(f"gpu0={name}")
 profile = os.environ.get("GATEWAY_PROFILE", "cloud_h100").lower()
-expected = ("H200",) if "h200" in profile else ("H100",) if "h100" in profile else ("H100", "H200")
+expected = ("B200", "GB200", "Blackwell") if "b200" in profile else ("H200",) if "h200" in profile else ("H100",) if "h100" in profile else ("H100", "H200", "B200", "GB200", "Blackwell")
 if not any(item in name for item in expected):
     raise SystemExit(f"Expected {' or '.join(expected)} GPU for GATEWAY_PROFILE={profile}, got {name}")
 PY
@@ -147,7 +149,7 @@ if not torch.cuda.is_available():
 name = torch.cuda.get_device_name(0)
 print(f"gpu0={name}")
 profile = os.environ.get("GATEWAY_PROFILE", "cloud_h100").lower()
-expected = ("H200",) if "h200" in profile else ("H100",) if "h100" in profile else ("H100", "H200")
+expected = ("B200", "GB200", "Blackwell") if "b200" in profile else ("H200",) if "h200" in profile else ("H100",) if "h100" in profile else ("H100", "H200", "B200", "GB200", "Blackwell")
 if not any(item in name for item in expected):
     raise SystemExit(f"Expected {' or '.join(expected)} GPU for GATEWAY_PROFILE={profile}, got {name}")
 PY

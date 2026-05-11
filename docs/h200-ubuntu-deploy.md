@@ -49,7 +49,7 @@ The deploy script installs `huggingface_hub[cli]` and `hf_transfer` before model
 
 For a local smoke run, use `TURSO_DB_URL=file:storage/gateway.db`. For production Turso, set both `TURSO_DB_URL=libsql://...` and `TURSO_AUTH_TOKEN=...`; placeholders are rejected before services start.
 
-For H100 servers, use `docs/h100-ubuntu-deploy.md` and `scripts/deploy_h100.sh`.
+For H100 servers, use `docs/h100-ubuntu-deploy.md` and `scripts/deploy_h100.sh`. For B200/GB200-class servers with native 20-second Full-HD generation, use `docs/b200-ubuntu-deploy.md` and `scripts/deploy_b200.sh`.
 
 After `git pull`, restart the gateway to pick up Rust gateway changes. The H200 wrapper rebuilds the release binary automatically when Rust source, migrations, or Cargo metadata are newer than the current binary:
 
